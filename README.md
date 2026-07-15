@@ -51,13 +51,23 @@ This clones the repo to `%USERPROFILE%\claude-key-pool`, installs dependencies, 
 
 **From then on, just double-click the desktop shortcut** — it starts the server and opens the UI automatically. That's it.
 
+### Updating
+
+To upgrade to the latest version at any time, open PowerShell and run:
+
+```powershell
+irm https://raw.githubusercontent.com/Ns81000/claude-key-pool/main/update.ps1 | iex
+```
+
+This stops any running server, pulls the latest code, reinstalls dependencies, rebuilds, and relaunches. Your saved keys in `config.json` are never touched.
+
 ---
 
 ## Using the dashboard
 
 1. **Create a group** — click `+`, give it a name and the upstream URL (e.g. `https://api.anthropic.com`).
 2. **Add keys** — one at a time, with an optional email/label. Keys are stored locally in `config.json` (which is git-ignored and never leaves your machine).
-3. **Connect Claude Code** — click **Connect** in the top bar. It rewrites your Claude CLI `settings.json` to route through the proxy (and backs up the original, restored on **Disconnect**).
+3. **Connect Claude Code** — click **Connect** in the top bar. It rewrites your Claude CLI `settings.json` to route through the proxy (and backs up the original, restored on **Disconnect** — or automatically when you **Stop the server** from the dashboard).
 
 Prefer manual setup? Point any Anthropic SDK at the proxy:
 

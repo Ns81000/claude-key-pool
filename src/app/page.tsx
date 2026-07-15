@@ -10,6 +10,7 @@ import {
   X,
   AlertTriangle,
   Circle,
+  Power,
 } from 'lucide-react';
 import type { AppConfigView, GroupView, KeyView } from '@/lib/config';
 
@@ -418,10 +419,45 @@ export default function Home() {
     }
   };
 
+  const [stopped, setStopped] = useState(false);
+  const stopServer = () => {
+    setConfirm({
+      title: 'Stop the proxy server',
+      message:
+        'This restores your Claude settings to their original state and shuts down the local proxy. Claude Code and any tools pointed at localhost:9999 will stop working until you start it again from the desktop shortcut.',
+      confirmLabel: 'Stop server',
+      onConfirm: async () => {
+        try {
+          await fetch('/api/shutdown', { method: 'POST' });
+        } catch {
+          /* the server may drop the connection as it exits — that's expected */
+        }
+        setStopped(true);
+      },
+    });
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <p className="text-muted text-[14px]">Loading Claude Key Pool…</p>
+      </div>
+    );
+  }
+
+  if (stopped) {
+    return (
+      <div className="min-h-screen flex items-center justify-center px-6">
+        <div className="text-center max-w-md flex flex-col items-center gap-4">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/logo.svg" alt="" width={48} height={48} className="rounded-[10px]" />
+          <h1 className="text-[22px] font-medium text-ink">Proxy server stopped</h1>
+          <p className="text-[14px] text-body">
+            The local server has shut down. To use Claude Key Pool again, open the
+            <span className="text-ink font-medium"> Claude Key Pool</span> shortcut on your
+            desktop, then refresh this page.
+          </p>
+        </div>
       </div>
     );
   }
@@ -462,6 +498,14 @@ export default function Home() {
                 </>
               )}
             </Button>
+            <button
+              onClick={stopServer}
+              title="Stop the proxy server"
+              aria-label="Stop the proxy server"
+              className="w-10 h-10 rounded-full border border-hairline flex items-center justify-center text-muted hover:text-[color:var(--color-status-invalid)] hover:border-[color:var(--color-status-invalid)] transition-colors cursor-pointer"
+            >
+              <Power className="w-4 h-4" />
+            </button>
           </div>
         </div>
       </header>

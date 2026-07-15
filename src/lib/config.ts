@@ -40,6 +40,7 @@ export interface AppConfigView extends Omit<AppConfig, 'groups'> {
 
 const CONFIG_FILE_PATH = path.join(process.cwd(), 'config.json');
 const CONFIG_TMP_PATH = CONFIG_FILE_PATH + '.tmp';
+const CONFIG_BACKUP_PATH = path.join(process.cwd(), 'config.backup.json');
 const CLAUDE_SETTINGS_PATH =
   process.env.CLAUDE_SETTINGS_PATH || 'C:/Users/Ns8pc/.claude/settings.json';
 
@@ -185,7 +186,23 @@ export function buildConfigView(config: AppConfig): AppConfigView {
 
 // Persistence ---------------------------------------------------------------
 
+function countKeys(config: AppConfig): number {
+  return config.groups.reduce((n, g) => n + g.keys.length, 0);
+}
+
 function writeConfigAtomic(config: AppConfig): void {
+  // Safety net: if this write would shrink the stored key set, keep a backup
+  // of the previous file so keys can never be silently lost.
+  try {
+    if (fs.existsSync(CONFIG_FILE_PATH)) {
+      const prev = readConfigFromDisk();
+      if (countKeys(prev) > countKeys(config)) {
+        fs.copyFileSync(CONFIG_FILE_PATH, CONFIG_BACKUP_PATH);
+      }
+    }
+  } catch {
+    /* backup is best-effort */
+  }
   const data = JSON.stringify(config, null, 2);
   fs.writeFileSync(CONFIG_TMP_PATH, data, 'utf-8');
   fs.renameSync(CONFIG_TMP_PATH, CONFIG_FILE_PATH);

@@ -63,22 +63,12 @@ pnpm install
 Write-Step 'Building the app'
 pnpm build
 
-# --- Launcher -------------------------------------------------------------
-# A small .cmd that starts the production server and opens the browser once
-# the port is listening. This is what the desktop shortcut points to.
-Write-Step 'Creating launcher and desktop shortcut'
+# --- Launcher + desktop shortcut ------------------------------------------
+# start-key-pool.cmd ships with the repo: it starts the production server and
+# opens the browser once the port is listening. The desktop shortcut points to it.
+Write-Step 'Creating desktop shortcut'
 
 $launcher = Join-Path $InstallToDir 'start-key-pool.cmd'
-@"
-@echo off
-title Claude Key Pool
-cd /d "%~dp0"
-echo Starting Claude Key Pool on http://localhost:$Port ...
-start "" /min cmd /c "pnpm start"
-powershell -NoProfile -Command "for (\$i=0; \$i -lt 60; \$i++) { try { Invoke-WebRequest -UseBasicParsing http://localhost:$Port -TimeoutSec 2 | Out-Null; break } catch { Start-Sleep -Milliseconds 500 } }"
-start "" http://localhost:$Port
-"@ | Set-Content -Path $launcher -Encoding ASCII
-
 $iconPath = Join-Path $InstallToDir 'public\logo.ico'
 $desktop  = [Environment]::GetFolderPath('Desktop')
 $shortcut = Join-Path $desktop 'Claude Key Pool.lnk'

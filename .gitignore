@@ -37,6 +37,7 @@ yarn-error.log*
 
 # local runtime config — holds your real API keys, never commit
 /config.json
+/config.backup.json
 
 # local test artifacts
 /mock-upstream.mjs
