@@ -42,6 +42,16 @@ if ($conns) {
   Write-Ok "No server was running"
 }
 
+# --- Prepare for pull ----------------------------------------------------
+Write-Step 'Preparing for update'
+try {
+  # Clean up any untracked files that might block the merge (like start-key-pool.cmd)
+  git clean -fd
+  Write-Ok "Cleaned working directory"
+} catch {
+  Write-Warn "Could not clean working directory (continuing anyway): $_"
+}
+
 # --- Pull latest ----------------------------------------------------------
 Write-Step 'Pulling the latest code from main branch'
 try {
