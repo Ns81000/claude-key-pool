@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Claude Key Pool — Local proxy & automatic API key rotation</title>
+<meta name="description" content="A fast, local proxy that pools your Anthropic-compatible API keys and rotates to the next one the moment a key hits a rate or usage limit — including mid-stream." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23181d26'/%3E%3Cpath d='M27 20a11 11 0 1 0 8.9 17.5L42 43.6l3.2-3.2-2.3-2.3 2.6-2.6-2.3-2.3-2.6 2.6-2.8-2.8A11 11 0 0 0 27 20Zm0 6a5 5 0 1 1 0 10 5 5 0 0 1 0-10Z' fill='%23fff'/%3E%3Ccircle cx='45' cy='20' r='5' fill='%23fcab79'/%3E%3C/svg%3E" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --canvas: #ffffff;
+    --surface-soft: #f8fafc;
+    --surface-strong: #e0e2e6;
+    --ink: #181d26;
+    --ink-active: #0d1218;
+    --body: #333840;
+    --muted: #41454d;
+    --hairline: #dddddd;
+    --coral: #aa2d00;
+    --peach: #fcab79;
+    --forest: #0a2e0e;
+    --success: #006400;
+    --radius-sm: 6px;
+    --radius-md: 10px;
+    --radius-lg: 12px;
+    --maxw: 1120px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+  body {
+    font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+    background: var(--canvas);
+    color: var(--body);
+    font-size: 16px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+  a { color: inherit; text-decoration: none; }
+  code, .mono { font-family: ui-monospace, 'SF Mono', 'Cascadia Mono', 'Segoe UI Mono', monospace; }
+
+  .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
+
+  /* ---------- nav ---------- */
+  header.nav {
+    position: sticky; top: 0; z-index: 50;
+    height: 64px; background: rgba(255,255,255,0.85);
+    backdrop-filter: saturate(180%) blur(12px);
+    border-bottom: 1px solid var(--hairline);
+  }
+  .nav-inner { height: 100%; display: flex; align-items: center; justify-content: space-between; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 500; color: var(--ink); font-size: 16px; }
+  .brand svg { width: 26px; height: 26px; border-radius: 6px; }
+  .nav-links { display: flex; align-items: center; gap: 28px; }
+  .nav-links a { font-size: 14px; color: var(--muted); transition: color .15s; }
+  .nav-links a:hover { color: var(--ink); }
+  .nav-links .gh { color: var(--ink); font-weight: 500; }
+  @media (max-width: 720px) { .nav-links a:not(.gh) { display: none; } }
+
+  /* ---------- buttons ---------- */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    font-size: 15px; font-weight: 500; font-family: inherit;
+    padding: 13px 22px; border-radius: var(--radius-lg); cursor: pointer;
+    border: 1px solid transparent; transition: transform .15s ease, background .15s, border-color .15s, box-shadow .15s;
+    white-space: nowrap;
+  }
+  .btn-primary { background: var(--ink); color: #fff; }
+  .btn-primary:hover { background: var(--ink-active); transform: translateY(-2px); box-shadow: 0 8px 24px rgba(24,29,38,.18); }
+  .btn-secondary { background: var(--canvas); color: var(--ink); border-color: var(--hairline); }
+  .btn-secondary:hover { border-color: var(--ink); transform: translateY(-2px); }
+
+  /* ---------- hero ---------- */
+  .hero { padding: 120px 0 84px; text-align: center; position: relative; }
+  .hero .badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 13px; color: var(--muted); background: var(--surface-soft);
+    border: 1px solid var(--hairline); padding: 6px 14px; border-radius: 9999px; margin-bottom: 28px;
+  }
+  .hero .badge .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 4px rgba(0,100,0,.12); }
+  .hero h1 {
+    font-size: clamp(34px, 6vw, 58px); font-weight: 500; color: var(--ink);
+    line-height: 1.08; letter-spacing: -0.02em; max-width: 900px; margin: 0 auto 22px;
+  }
+  .hero h1 .accent { color: var(--coral); }
+  .hero p.sub { font-size: clamp(16px, 2.4vw, 20px); color: var(--body); max-width: 640px; margin: 0 auto 40px; }
+  .hero-cta { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+
+  .float-logo { width: 84px; height: 84px; margin: 0 auto 30px; display: block; animation: floaty 5s ease-in-out infinite; }
+  @keyframes floaty { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-10px); } }
+
+  /* ---------- rotation visual ---------- */
+  .keyring { display: flex; gap: 10px; justify-content: center; margin-top: 64px; flex-wrap: wrap; }
+  .keychip {
+    display: flex; align-items: center; gap: 8px; font-size: 13px; font-family: ui-monospace, monospace;
+    padding: 9px 14px; border-radius: 9999px; border: 1px solid var(--hairline); background: var(--canvas); color: var(--muted);
+  }
+  .keychip .s { width: 8px; height: 8px; border-radius: 50%; }
+  .keychip.active { border-color: var(--ink); color: var(--ink); }
+  .keychip.active .s { background: var(--success); animation: pulse 1.6s infinite; }
+  .keychip.limited .s { background: var(--peach); }
+  .keychip.idle .s { background: var(--surface-strong); }
+  @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(0,100,0,.35);} 50% { box-shadow: 0 0 0 5px rgba(0,100,0,0);} }
+
+  /* ---------- sections ---------- */
+  section { padding: 84px 0; }
+  .eyebrow { font-size: 13px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--coral); margin-bottom: 14px; }
+  h2.title { font-size: clamp(28px, 4vw, 40px); font-weight: 500; color: var(--ink); letter-spacing: -0.015em; line-height: 1.15; margin-bottom: 16px; }
+  .lead { font-size: 17px; color: var(--body); max-width: 620px; }
+  .section-head { max-width: 660px; margin-bottom: 48px; }
+
+  /* ---------- features grid ---------- */
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+  @media (max-width: 900px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 600px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--canvas); border: 1px solid var(--hairline); border-radius: var(--radius-md);
+    padding: 26px; transition: transform .2s ease, box-shadow .2s ease, border-color .2s;
+  }
+  .card:hover { transform: translateY(-4px); box-shadow: 0 14px 40px rgba(24,29,38,.08); border-color: var(--surface-strong); }
+  .card .ic { width: 42px; height: 42px; border-radius: 10px; background: var(--ink); display: flex; align-items: center; justify-content: center; margin-bottom: 18px; }
+  .card .ic svg { width: 22px; height: 22px; stroke: #fff; }
+  .card h3 { font-size: 18px; font-weight: 500; color: var(--ink); margin-bottom: 8px; }
+  .card p { font-size: 14.5px; color: var(--muted); }
+
+  /* ---------- install ---------- */
+  .install { background: var(--surface-soft); border-top: 1px solid var(--hairline); border-bottom: 1px solid var(--hairline); }
+  .steps { display: flex; flex-direction: column; gap: 22px; margin-top: 12px; }
+  .step { display: flex; gap: 18px; align-items: flex-start; }
+  .step .n {
+    flex: none; width: 30px; height: 30px; border-radius: 50%; background: var(--ink); color: #fff;
+    font-size: 14px; font-weight: 600; display: flex; align-items: center; justify-content: center; margin-top: 4px;
+  }
+  .step .content { flex: 1; min-width: 0; }
+  .step .content h4 { font-size: 16px; font-weight: 500; color: var(--ink); margin-bottom: 10px; }
+  .step .content .note { font-size: 14px; color: var(--muted); margin-bottom: 10px; }
+
+  .cmd {
+    display: flex; align-items: center; gap: 12px; justify-content: space-between;
+    background: var(--ink); color: #f4f4f5; border-radius: var(--radius-md);
+    padding: 14px 16px; font-size: 13.5px; max-width: 100%;
+  }
+  .cmd code {
+    white-space: nowrap; color: #e8eaed; min-width: 0; flex: 1;
+    overflow-x: auto; -webkit-overflow-scrolling: touch;
+    font-family: ui-monospace, monospace;
+  }
+  .cmd code::-webkit-scrollbar { height: 5px; }
+  .cmd code::-webkit-scrollbar-thumb { background: rgba(255,255,255,.2); border-radius: 9999px; }
+  .cmd code .tok { color: var(--peach); }
+  .copy {
+    flex: none; display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+    background: rgba(255,255,255,.1); color: #fff; border: 1px solid rgba(255,255,255,.16);
+    border-radius: var(--radius-sm); padding: 6px 11px; font-size: 12.5px; font-family: 'Inter', sans-serif; transition: background .15s;
+  }
+  .copy:hover { background: rgba(255,255,255,.2); }
+  .copy.done { background: var(--success); border-color: var(--success); }
+
+  /* ---------- rotation table ---------- */
+  .rot { display: grid; grid-template-columns: 1fr 1fr; gap: 0; border: 1px solid var(--hairline); border-radius: var(--radius-md); overflow: hidden; }
+  @media (max-width: 640px) { .rot { grid-template-columns: 1fr; } }
+  .rot .row { display: contents; }
+  .rot .c { padding: 16px 20px; border-bottom: 1px solid var(--hairline); font-size: 14.5px; }
+  .rot .c.k { color: var(--ink); font-weight: 500; background: var(--surface-soft); }
+  .rot .c.v { color: var(--muted); }
+  @media (max-width: 640px) { .rot .c.k { border-bottom: none; padding-bottom: 4px; } }
+
+  /* ---------- cta band ---------- */
+  .ctaband { background: var(--ink); border-radius: var(--radius-lg); padding: 64px 40px; text-align: center; color: #fff; position: relative; overflow: hidden; }
+  .ctaband::after { content:''; position:absolute; width: 240px; height: 240px; background: radial-gradient(circle, rgba(252,171,121,.22), transparent 70%); top: -80px; right: -40px; }
+  .ctaband h2 { color: #fff; font-size: clamp(26px, 4vw, 36px); font-weight: 500; margin-bottom: 14px; position: relative; }
+  .ctaband p { color: rgba(255,255,255,.7); max-width: 520px; margin: 0 auto 32px; position: relative; }
+  .ctaband .btn-secondary { position: relative; }
+
+  /* ---------- footer ---------- */
+  footer { padding: 48px 0; border-top: 1px solid var(--hairline); }
+  .foot-inner { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; }
+  .foot-inner .brand { font-size: 15px; }
+  .foot-inner .meta { font-size: 13.5px; color: var(--muted); }
+  .foot-inner .meta a { color: var(--ink); }
+
+  /* ---------- reveal animation ---------- */
+  .reveal { opacity: 0; transform: translateY(24px); transition: opacity .7s cubic-bezier(.2,.6,.2,1), transform .7s cubic-bezier(.2,.6,.2,1); }
+  .reveal.in { opacity: 1; transform: none; }
+  .reveal.d1 { transition-delay: .08s; }
+  .reveal.d2 { transition-delay: .16s; }
+  .reveal.d3 { transition-delay: .24s; }
+
+  /* Hero content animates in on load (never JS-dependent, always visible). */
+  .rise { opacity: 0; transform: translateY(22px); animation: rise .8s cubic-bezier(.2,.6,.2,1) forwards; }
+  .rise.r1 { animation-delay: .05s; }
+  .rise.r2 { animation-delay: .15s; }
+  .rise.r3 { animation-delay: .25s; }
+  .rise.r4 { animation-delay: .35s; }
+  @keyframes rise { to { opacity: 1; transform: none; } }
+
+  @media (prefers-reduced-motion: reduce) {
+    .reveal, .rise { opacity: 1; transform: none; transition: none; animation: none; }
+    .float-logo, .keychip.active .s { animation: none; }
+    html { scroll-behavior: auto; }
+  }
+</style>
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="#top">
+      <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="64" height="64" rx="14" fill="#181d26"/><path d="M27 20a11 11 0 1 0 8.9 17.5L42 43.6l3.2-3.2-2.3-2.3 2.6-2.6-2.3-2.3-2.6 2.6-2.8-2.8A11 11 0 0 0 27 20Zm0 6a5 5 0 1 1 0 10 5 5 0 0 1 0-10Z" fill="#fff"/><circle cx="45" cy="20" r="5" fill="#fcab79"/></svg>
+      Claude Key Pool
+    </a>
+    <nav class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#install">Install</a>
+      <a href="#rotation">How it works</a>
+      <a class="gh" href="https://github.com/Ns81000/claude-key-pool" target="_blank" rel="noopener">GitHub ↗</a>
+    </nav>
+  </div>
+</header>
+
+<a id="top"></a>
+<section class="hero">
+  <div class="wrap">
+    <svg class="float-logo" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="64" height="64" rx="14" fill="#181d26"/><path d="M27 20a11 11 0 1 0 8.9 17.5L42 43.6l3.2-3.2-2.3-2.3 2.6-2.6-2.3-2.3-2.6 2.6-2.8-2.8A11 11 0 0 0 27 20Zm0 6a5 5 0 1 1 0 10 5 5 0 0 1 0-10Z" fill="#fff"/><circle cx="45" cy="20" r="5" fill="#fcab79"/></svg>
+    <div class="badge rise"><span class="dot"></span> Runs locally on port 9999</div>
+    <h1 class="rise r1">Never let one exhausted key <span class="accent">stop your session</span></h1>
+    <p class="sub rise r2">A fast, local proxy that pools your Anthropic-compatible API keys and rotates to the next one the moment a key hits a rate or usage limit — including mid-stream.</p>
+    <div class="hero-cta rise r3">
+      <a class="btn btn-primary" href="#install">Get started</a>
+      <a class="btn btn-secondary" href="https://github.com/Ns81000/claude-key-pool" target="_blank" rel="noopener">View on GitHub</a>
+    </div>
+
+    <div class="keyring rise r4">
+      <div class="keychip limited"><span class="s"></span> key_01 · limited</div>
+      <div class="keychip active"><span class="s"></span> key_02 · active →</div>
+      <div class="keychip idle"><span class="s"></span> key_03 · idle</div>
+    </div>
+  </div>
+</section>
+
+<section id="features">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <div class="eyebrow">Why it exists</div>
+      <h2 class="title">Rotation that just works — even while streaming</h2>
+      <p class="lead">Built for the Claude Code CLI and any Anthropic-compatible SDK. Point it at your upstream, drop in your keys, and let it handle the limits.</p>
+    </div>
+    <div class="grid">
+      <div class="card reveal">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></div>
+        <h3>Automatic rotation</h3>
+        <p>429s, rate-limit, overloaded, quota, credit and usage-limit errors all trigger a transparent switch to the next available key.</p>
+      </div>
+      <div class="card reveal d1">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></div>
+        <h3>Mid-stream aware</h3>
+        <p>Detects error events inside a streaming response before any content reaches you, and silently retries on a working key. You see one clean stream.</p>
+      </div>
+      <div class="card reveal d2">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></div>
+        <h3>Honors retry-after</h3>
+        <p>Cooldowns respect the upstream's retry-after and ratelimit-reset headers. A limited key auto-recovers when its cooldown ends.</p>
+      </div>
+      <div class="card reveal">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></div>
+        <h3>Fast & robust</h3>
+        <p>Reads config from an in-memory cache on the hot path, never writes to disk per request, and forwards bodies without needless re-serialization.</p>
+      </div>
+      <div class="card reveal d1">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></div>
+        <h3>Grouped keys</h3>
+        <p>Organize keys by upstream endpoint and switch the active pool with one click. Round-robin spreads load evenly across active keys.</p>
+      </div>
+      <div class="card reveal d2">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></div>
+        <h3>Minimal dashboard</h3>
+        <p>A calm, editorial UI. No token counters, no noise — just your groups, keys, and each key's live status: Ready, Rate-limited, or Invalid.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="install" class="install">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <div class="eyebrow">Install on Windows</div>
+      <h2 class="title">One command. A desktop shortcut. Done.</h2>
+      <p class="lead">The installer clones the repo, installs dependencies, builds the app, and drops a shortcut on your desktop that launches the dashboard in your browser.</p>
+    </div>
+
+    <div class="steps">
+      <div class="step reveal">
+        <div class="n">1</div>
+        <div class="content">
+          <h4>Install the prerequisites (skip any you already have)</h4>
+          <div class="note">Run in PowerShell. pnpm is enabled automatically by the installer via corepack.</div>
+          <div class="cmd">
+            <code id="c1">winget install --id Git.Git -e; winget install --id OpenJS.NodeJS.LTS -e</code>
+            <button class="copy" data-target="c1">Copy</button>
+          </div>
+        </div>
+      </div>
+      <div class="step reveal d1">
+        <div class="n">2</div>
+        <div class="content">
+          <h4>Run the one-command installer</h4>
+          <div class="note">Open a new PowerShell window and paste this. It builds everything and creates your desktop shortcut.</div>
+          <div class="cmd">
+            <code id="c2"><span class="tok">irm</span> https://raw.githubusercontent.com/Ns81000/claude-key-pool/main/install.ps1 | <span class="tok">iex</span></code>
+            <button class="copy" data-target="c2">Copy</button>
+          </div>
+        </div>
+      </div>
+      <div class="step reveal d2">
+        <div class="n">3</div>
+        <div class="content">
+          <h4>Open the dashboard any time</h4>
+          <div class="note">Double-click the “Claude Key Pool” shortcut on your desktop — it starts the server and opens the UI at localhost:9999. Add your keys and hit Connect.</div>
+          <div class="cmd">
+            <code id="c3">http://localhost:9999</code>
+            <button class="copy" data-target="c3">Copy</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-head reveal" style="margin-top:56px;margin-bottom:20px;">
+      <div class="eyebrow">Manual / cross-platform</div>
+      <h2 class="title" style="font-size:24px;">Any OS with Node 20+ and pnpm</h2>
+    </div>
+    <div class="cmd reveal">
+      <code id="c4">git clone https://github.com/Ns81000/claude-key-pool.git &amp;&amp; cd claude-key-pool &amp;&amp; pnpm install &amp;&amp; pnpm build &amp;&amp; pnpm start</code>
+      <button class="copy" data-target="c4">Copy</button>
+    </div>
+  </div>
+</section>
+
+<section id="rotation">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <div class="eyebrow">How it works</div>
+      <h2 class="title">Every failure mode, handled</h2>
+      <p class="lead">The proxy classifies each upstream response and decides whether to rotate, retry, or fail cleanly.</p>
+    </div>
+    <div class="rot reveal">
+      <div class="row"><div class="c k">429 Too Many Requests</div><div class="c v">Mark key rate-limited, honor retry-after, rotate</div></div>
+      <div class="row"><div class="c k">401 / 403</div><div class="c v">Mark key invalid (won't auto-recover), rotate</div></div>
+      <div class="row"><div class="c k">rate_limit / overloaded / quota</div><div class="c v">Mark limited, rotate to the next key</div></div>
+      <div class="row"><div class="c k">SSE error before any content</div><div class="c v">Silently retry — client sees one clean stream</div></div>
+      <div class="row"><div class="c k">SSE error after content started</div><div class="c v">Forward as-is, mark limited so the next request rotates</div></div>
+      <div class="row"><div class="c k">5xx / network / timeout</div><div class="c v">Transient — try next key; 502 only if all fail</div></div>
+      <div class="row"><div class="c k">All keys exhausted</div><div class="c v">Return a clean 429 to the client</div></div>
+    </div>
+  </div>
+</section>
+
+<section style="padding-top:0;">
+  <div class="wrap">
+    <div class="ctaband reveal">
+      <h2>Pool your keys. Keep your flow.</h2>
+      <p>Open source under MIT. Your keys are stored only in a local, git-ignored file — they never leave your machine.</p>
+      <a class="btn btn-secondary" href="https://github.com/Ns81000/claude-key-pool" target="_blank" rel="noopener">Star on GitHub ↗</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap foot-inner">
+    <a class="brand" href="#top">
+      <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" style="width:24px;height:24px;border-radius:6px;"><rect width="64" height="64" rx="14" fill="#181d26"/><path d="M27 20a11 11 0 1 0 8.9 17.5L42 43.6l3.2-3.2-2.3-2.3 2.6-2.6-2.3-2.3-2.6 2.6-2.8-2.8A11 11 0 0 0 27 20Zm0 6a5 5 0 1 1 0 10 5 5 0 0 1 0-10Z" fill="#fff"/><circle cx="45" cy="20" r="5" fill="#fcab79"/></svg>
+      Claude Key Pool
+    </a>
+    <div class="meta">MIT License · © 2026 <a href="https://github.com/Ns81000" target="_blank" rel="noopener">Ns81000</a></div>
+  </div>
+</footer>
+
+<script>
+  // Copy-to-clipboard
+  document.querySelectorAll('.copy').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var el = document.getElementById(btn.dataset.target);
+      var text = el.innerText;
+      navigator.clipboard.writeText(text).then(function () {
+        var old = btn.innerText;
+        btn.innerText = 'Copied';
+        btn.classList.add('done');
+        setTimeout(function () { btn.innerText = old; btn.classList.remove('done'); }, 1600);
+      });
+    });
+  });
+
+  // Scroll reveal
+  var io = new IntersectionObserver(function (entries) {
+    entries.forEach(function (e) {
+      if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); }
+    });
+  }, { threshold: 0.12 });
+  document.querySelectorAll('.reveal').forEach(function (el) { io.observe(el); });
+</script>
+</body>
+</html>
