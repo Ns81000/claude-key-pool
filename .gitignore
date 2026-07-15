@@ -35,6 +35,12 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 
+# local runtime config — holds your real API keys, never commit
+/config.json
+
+# local test artifacts
+/mock-upstream.mjs
+
 # vercel
 .vercel
 

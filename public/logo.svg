@@ -1,0 +1,5 @@
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Claude Key Pool">
+  <rect width="64" height="64" rx="14" fill="#181d26"/>
+  <path d="M27 20a11 11 0 1 0 8.9 17.5L42 43.6l3.2-3.2-2.3-2.3 2.6-2.6-2.3-2.3-2.6 2.6-2.8-2.8A11 11 0 0 0 27 20Zm0 6a5 5 0 1 1 0 10 5 5 0 0 1 0-10Z" fill="#ffffff"/>
+  <circle cx="45" cy="20" r="5" fill="#fcab79"/>
+</svg>

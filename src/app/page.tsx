@@ -213,7 +213,7 @@ export default function Home() {
 
   const [showNewGroup, setShowNewGroup] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
-  const [newGroupUrl, setNewGroupUrl] = useState('https://cc.freemodel.dev');
+  const [newGroupUrl, setNewGroupUrl] = useState('');
 
   const [newKeyEmail, setNewKeyEmail] = useState('');
   const [newKeyValue, setNewKeyValue] = useState('');
@@ -309,17 +309,17 @@ export default function Home() {
 
   const createGroup = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!config || !newGroupName.trim()) return;
+    if (!config || !newGroupName.trim() || !newGroupUrl.trim()) return;
     const group: GroupView = {
       id: genId('group'),
       name: newGroupName.trim(),
-      targetUrl: (newGroupUrl.trim() || 'https://api.anthropic.com').replace(/\/$/, ''),
+      targetUrl: newGroupUrl.trim().replace(/\/$/, ''),
       keys: [],
     };
     try {
       await saveGroups([...config.groups, group], config.activeGroupId || group.id);
       setNewGroupName('');
-      setNewGroupUrl('https://cc.freemodel.dev');
+      setNewGroupUrl('');
       setShowNewGroup(false);
       pushToast(`Group "${group.name}" created`);
     } catch (err) {
@@ -433,7 +433,11 @@ export default function Home() {
       {/* Top bar */}
       <header className="h-16 border-b border-hairline bg-canvas sticky top-0 z-30">
         <div className="max-w-[1120px] mx-auto h-full px-6 flex items-center justify-between">
-          <span className="text-[16px] font-medium text-ink tracking-tight">Claude Key Pool</span>
+          <div className="flex items-center gap-2.5">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/logo.svg" alt="" width={24} height={24} className="rounded-[6px]" />
+            <span className="text-[16px] font-medium text-ink tracking-tight">Claude Key Pool</span>
+          </div>
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2">
               <Circle
@@ -492,7 +496,7 @@ export default function Home() {
                 {...noAutofill}
               />
               <TextInput
-                placeholder="Upstream URL"
+                placeholder="Upstream URL (e.g. https://api.anthropic.com)"
                 value={newGroupUrl}
                 onChange={(e) => setNewGroupUrl(e.target.value)}
                 mono
@@ -500,7 +504,12 @@ export default function Home() {
                 {...noAutofill}
               />
               <div className="flex gap-2">
-                <Button type="submit" variant="primary" className="flex-1">
+                <Button
+                  type="submit"
+                  variant="primary"
+                  className="flex-1"
+                  disabled={!newGroupName.trim() || !newGroupUrl.trim()}
+                >
                   Create
                 </Button>
                 <Button type="button" variant="secondary" onClick={() => setShowNewGroup(false)}>

@@ -1,0 +1,19 @@
+{
+  "activeGroupId": null,
+  "groups": [
+    {
+      "id": "group_example",
+      "name": "Example Pool",
+      "targetUrl": "https://api.anthropic.com",
+      "keys": [
+        {
+          "id": "key_example",
+          "email": "you@example.com",
+          "key": "sk-ant-your-key-here"
+        }
+      ]
+    }
+  ],
+  "isConnected": false,
+  "backupSettings": null
+}
