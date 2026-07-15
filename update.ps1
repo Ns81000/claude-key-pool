@@ -13,14 +13,17 @@ $Port = 9999
 function Write-Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 function Write-Ok($msg)   { Write-Host "    $msg" -ForegroundColor Green }
 function Write-Warn($msg) { Write-Host "    $msg" -ForegroundColor Yellow }
+function Write-Error($msg) { Write-Host "    ERROR: $msg" -ForegroundColor Red }
 
 Write-Host "Claude Key Pool updater" -ForegroundColor White
 
 # --- Locate the install ---------------------------------------------------
 if (-not (Test-Path (Join-Path $InstallToDir '.git'))) {
-  throw "No existing install found at $InstallToDir. Run the installer first: irm https://raw.githubusercontent.com/Ns81000/claude-key-pool/main/install.ps1 | iex"
+  Write-Error "No existing install found at $InstallToDir"
+  throw "Run the installer first: irm https://raw.githubusercontent.com/Ns81000/claude-key-pool/main/install.ps1 | iex"
 }
 Set-Location $InstallToDir
+Write-Ok "Found installation at $InstallToDir"
 
 # --- Stop a running server ------------------------------------------------
 # Free port 9999 so the rebuild and relaunch don't collide with a live server.
@@ -28,29 +31,64 @@ Write-Step "Stopping any running server on port $Port"
 $conns = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
 if ($conns) {
   $conns | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object {
-    try { Stop-Process -Id $_ -Force -ErrorAction Stop; Write-Ok "Stopped process $_" }
-    catch { Write-Warn "Could not stop process $_ (it may have already exited)" }
+    try {
+      Stop-Process -Id $_ -Force -ErrorAction Stop
+      Write-Ok "Stopped process $_"
+    } catch {
+      Write-Warn "Could not stop process $_ (it may have already exited)"
+    }
   }
 } else {
   Write-Ok "No server was running"
 }
 
 # --- Pull latest ----------------------------------------------------------
-Write-Step 'Pulling the latest code'
-git pull --ff-only
-Write-Ok "Up to date"
+Write-Step 'Pulling the latest code from main branch'
+try {
+  $pullOutput = git pull origin main --ff-only 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    Write-Error "git pull failed with exit code $LASTEXITCODE"
+    Write-Host $pullOutput
+    throw "Failed to pull latest code"
+  }
+  Write-Ok "Successfully pulled latest code"
+  Write-Ok "Current version: $(git log -1 --oneline)"
+} catch {
+  Write-Error "Failed to pull: $_"
+  throw $_
+}
 
 # --- Install + build ------------------------------------------------------
-Write-Step 'Installing dependencies'
-pnpm install
+Write-Step 'Installing dependencies with pnpm'
+try {
+  pnpm install
+  Write-Ok "Dependencies installed"
+} catch {
+  Write-Error "pnpm install failed: $_"
+  throw $_
+}
 
-Write-Step 'Rebuilding the app'
-pnpm build
+Write-Step 'Building the app'
+try {
+  pnpm build
+  Write-Ok "Build successful"
+} catch {
+  Write-Error "pnpm build failed: $_"
+  throw $_
+}
 
 # --- Relaunch -------------------------------------------------------------
-Write-Step 'Relaunching'
+Write-Step 'Relaunching the proxy server'
 $launcher = Join-Path $InstallToDir 'start-key-pool.cmd'
 
-Write-Host "`nUpdated." -ForegroundColor Green
-Write-Host "Launching the dashboard..." -ForegroundColor White
+if (-not (Test-Path $launcher)) {
+  Write-Error "Launcher not found at $launcher"
+  throw "start-key-pool.cmd not found"
+}
+
+Write-Host "`n✓ Updated successfully!" -ForegroundColor Green
+Write-Host "Current version: $(git log -1 --oneline)" -ForegroundColor Green
+Write-Host "`nLaunching the dashboard..." -ForegroundColor White
+
+Start-Sleep -Milliseconds 500
 & $launcher
