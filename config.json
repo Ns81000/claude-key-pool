@@ -1,0 +1,24 @@
+{
+  "activeGroupId": "group_trwgrb869",
+  "groups": [
+    {
+      "id": "group_trwgrb869",
+      "name": "Freemodel",
+      "targetUrl": "https://cc.freemodel.dev",
+      "keys": [
+        {
+          "id": "key_5g5fpaew4",
+          "email": "ns8pc1@gmail.com",
+          "key": "fe_oa_96a782801fb7eb26680a8fb4cba9324c547a205dee820b21"
+        },
+        {
+          "id": "key_q4mwadfo7",
+          "email": "awdheshsingh.v7@gmail.com",
+          "key": "fe_oa_b40bae07e85837b3de0b90a496874e869992b06339ad10a0"
+        }
+      ]
+    }
+  ],
+  "isConnected": true,
+  "backupSettings": "{\n  \"apiKeyHelper\": \"echo 'YOUR_API_KEY'\",\n  \"env\": {\n    \"ANTHROPIC_API_KEY\": \"fe_oa_77e6c3100a4065c26cda729d6f6bc33509ee3228fb855cea\",\n    \"ANTHROPIC_BASE_URL\": \"https://cc.freemodel.dev\",\n    \"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC\": \"1\"\n  },\n  \"permissions\": {\n    \"allow\": [],\n    \"deny\": []\n  },\n  \"model\": \"haiku\",\n  \"autoUpdatesChannel\": \"latest\",\n  \"skipDangerousModePermissionPrompt\": true,\n  \"theme\": \"dark\",\n  \"defaultMode\": \"bypassPermissions\"\n}\n"
+}
