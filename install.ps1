@@ -1,6 +1,7 @@
 # Claude Key Pool - one-command installer for Windows
 # Clones the repo, installs dependencies, builds the app, and creates a
 # desktop shortcut (with the app logo) that launches the UI in your browser.
+# Safe to re-run at any time: an existing install is force-synced and rebuilt.
 #
 # Run in PowerShell:
 #   irm https://raw.githubusercontent.com/Ns81000/claude-key-pool/main/install.ps1 | iex
@@ -24,10 +25,12 @@ function Test-Command($name) {
 }
 
 # Run a native command safely. Native tools (git, pnpm, node) routinely write
-# progress to stderr; under $ErrorActionPreference='Stop' a naive 2>&1 turns
-# that harmless text into a terminating NativeCommandError. Here we temporarily
-# relax the preference, stream all output live, and decide success purely from
-# the process exit code.
+# progress to stderr; under $ErrorActionPreference='Stop' that stderr would be
+# turned into a terminating NativeCommandError even on success. Here we relax
+# the preference so the tool's own output prints naturally, and we judge success
+# only by the process exit code (stored in $script:NativeExit for the rare
+# -AllowFail caller that wants to inspect it). Returns nothing, so call sites
+# never leak a stray exit code into the console.
 function Invoke-Native {
   param(
     [Parameter(Mandatory)][string]$Exe,
@@ -37,15 +40,44 @@ function Invoke-Native {
   $prev = $ErrorActionPreference
   $ErrorActionPreference = 'Continue'
   try {
-    & $Exe @Arguments 2>&1 | ForEach-Object { Write-Host "    $_" }
-    $code = $LASTEXITCODE
+    & $Exe @Arguments
+    $script:NativeExit = $LASTEXITCODE
   } finally {
     $ErrorActionPreference = $prev
   }
-  if (-not $AllowFail -and $code -ne 0) {
-    throw "$Exe $($Arguments -join ' ') failed (exit code $code)"
+  if ($null -eq $script:NativeExit) { $script:NativeExit = 0 }
+  if (-not $AllowFail -and $script:NativeExit -ne 0) {
+    throw "$Exe $($Arguments -join ' ') failed (exit code $script:NativeExit)"
   }
-  return $code
+}
+
+# Free the port so a rebuild/relaunch never collides with an already-running
+# server (matters when the installer is re-run while the app is open).
+function Stop-ServerOnPort($portNumber) {
+  try {
+    $conns = Get-NetTCPConnection -LocalPort $portNumber -State Listen -ErrorAction SilentlyContinue
+    if ($conns) {
+      $conns | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object {
+        try { Stop-Process -Id $_ -Force -ErrorAction Stop; Write-Ok "Stopped process $_ on port $portNumber" }
+        catch { Write-Warn "Could not stop process $_ (it may have already exited)" }
+      }
+      return
+    }
+  } catch {
+    # Get-NetTCPConnection missing on minimal/older systems - fall back to netstat.
+    try {
+      $lines = netstat -ano -p tcp 2>$null | Select-String ":$portNumber\s.*LISTENING"
+      $pids  = $lines | ForEach-Object { ($_ -split '\s+')[-1] } | Sort-Object -Unique
+      foreach ($procId in $pids) {
+        if ($procId -match '^\d+$') {
+          try { Stop-Process -Id $procId -Force -ErrorAction Stop; Write-Ok "Stopped process $procId on port $portNumber" }
+          catch { Write-Warn "Could not stop process $procId" }
+        }
+      }
+      return
+    } catch { }
+  }
+  Write-Ok "No server was running on port $portNumber"
 }
 
 Write-Host "Claude Key Pool installer" -ForegroundColor White
@@ -66,10 +98,10 @@ Write-Ok "node $(node --version) found"
 # Enable pnpm through corepack (ships with Node) if it is not present.
 if (-not (Test-Command pnpm)) {
   Write-Warn 'pnpm not found - enabling it via corepack'
-  Invoke-Native corepack @('enable', 'pnpm') -AllowFail | Out-Null
-  Invoke-Native corepack @('prepare', 'pnpm@latest', '--activate') -AllowFail | Out-Null
-  # corepack drops shims into Node's dir, which is already on PATH, but the
-  # current session's command cache may be stale - force a lookup refresh.
+  Invoke-Native corepack @('enable', 'pnpm') -AllowFail
+  Invoke-Native corepack @('prepare', 'pnpm@latest', '--activate') -AllowFail
+  # corepack drops shims into Node's dir (already on PATH), but this session's
+  # command cache may be stale - refresh PATH so the shim is found right away.
   $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
               [System.Environment]::GetEnvironmentVariable('Path', 'User')
 }
@@ -78,20 +110,28 @@ if (-not (Test-Command pnpm)) {
 }
 Write-Ok "pnpm $(pnpm --version) found"
 
+# --- Stop any running server ---------------------------------------------
+# A re-run of the installer while the app is open would otherwise fail to
+# rebuild/relaunch. Free the port up front.
+Write-Step "Stopping any running server on port $Port"
+Stop-ServerOnPort $Port
+
 # --- Clone / update -------------------------------------------------------
 $gitDir = Join-Path $InstallToDir '.git'
 if (Test-Path $gitDir) {
-  Write-Step "Updating existing install at $InstallToDir"
+  # Already installed - behave like the updater: force-sync to the remote.
+  Write-Step "Existing install found - updating it at $InstallToDir"
   Invoke-Native git @('-C', $InstallToDir, 'fetch', '--prune', 'origin')
-  # Force the working tree to match the remote branch. config.json and other
-  # git-ignored files are left untouched (reset/clean never touch ignored files).
-  Invoke-Native git @('-C', $InstallToDir, 'checkout', '-f', $Branch) -AllowFail | Out-Null
+  Invoke-Native git @('-C', $InstallToDir, 'checkout', '-f', $Branch) -AllowFail
   Invoke-Native git @('-C', $InstallToDir, 'reset', '--hard', "origin/$Branch")
-  Invoke-Native git @('-C', $InstallToDir, 'clean', '-fd')
+  # -x removes ignored build artifacts too, but we KEEP config.json / backups
+  # so a re-install never wipes the user's saved keys.
+  Invoke-Native git @('-C', $InstallToDir, 'clean', '-fd', '-e', 'config.json', '-e', 'config.backup.json')
 } elseif (Test-Path $InstallToDir) {
-  # Directory exists but isn't a git checkout (partial/corrupt install).
-  if ((Get-ChildItem -Force $InstallToDir | Measure-Object).Count -gt 0) {
-    throw "$InstallToDir already exists but is not a git repository. Move or delete it, then re-run the installer."
+  # Directory exists but isn't a git checkout (partial/corrupt/interrupted install).
+  $hasFiles = (Get-ChildItem -Force $InstallToDir | Measure-Object).Count -gt 0
+  if ($hasFiles) {
+    throw "$InstallToDir exists but is not a git repository. Move or delete it, then re-run the installer."
   }
   Write-Step "Cloning into $InstallToDir"
   Invoke-Native git @('clone', '--branch', $Branch, $RepoUrl, $InstallToDir)
@@ -139,7 +179,10 @@ Write-Host "Double-click 'Claude Key Pool' on your desktop any time to open the 
 
 if (Test-Path $launcher) {
   Write-Host "Launching now..." -ForegroundColor White
-  & $launcher
+  # Launch in its OWN new console window and return immediately. Using & here
+  # would host the batch file inside this session and trigger a
+  # "Terminate batch job (Y/N)?" prompt on exit.
+  Start-Process -FilePath $launcher -WorkingDirectory $InstallToDir
 } else {
   Write-Err "Launcher not found at $launcher - the build may be incomplete."
 }

@@ -1,6 +1,7 @@
 # Claude Key Pool - one-command updater for Windows
 # Pulls the latest code, reinstalls dependencies, rebuilds, and relaunches.
 # Your keys (config.json) are never touched - that file is local and git-ignored.
+# If no install exists yet, this falls back to a full install automatically.
 #
 # Run in PowerShell:
 #   irm https://raw.githubusercontent.com/Ns81000/claude-key-pool/main/update.ps1 | iex
@@ -23,11 +24,11 @@ function Test-Command($name) {
   return [bool](Get-Command $name -ErrorAction SilentlyContinue)
 }
 
-# Run a native command safely. Native tools (git, pnpm) routinely write progress
-# to stderr; under $ErrorActionPreference='Stop' a naive 2>&1 turns that harmless
-# text into a terminating NativeCommandError even when the command succeeded
-# (exit code 0). This is exactly what broke `git pull` before. Here we relax the
-# preference, stream all output live, and judge success only by the exit code.
+# Run a native command safely. See install.ps1 for the full rationale: native
+# tools write progress to stderr, which under 'Stop' would become a terminating
+# NativeCommandError even on success (exit code 0) - the original git-pull bug.
+# We relax the preference so output prints naturally and judge success by exit
+# code only. Returns nothing, so no stray exit code leaks to the console.
 function Invoke-Native {
   param(
     [Parameter(Mandatory)][string]$Exe,
@@ -37,23 +38,54 @@ function Invoke-Native {
   $prev = $ErrorActionPreference
   $ErrorActionPreference = 'Continue'
   try {
-    & $Exe @Arguments 2>&1 | ForEach-Object { Write-Host "    $_" }
-    $code = $LASTEXITCODE
+    & $Exe @Arguments
+    $script:NativeExit = $LASTEXITCODE
   } finally {
     $ErrorActionPreference = $prev
   }
-  if (-not $AllowFail -and $code -ne 0) {
-    throw "$Exe $($Arguments -join ' ') failed (exit code $code)"
+  if ($null -eq $script:NativeExit) { $script:NativeExit = 0 }
+  if (-not $AllowFail -and $script:NativeExit -ne 0) {
+    throw "$Exe $($Arguments -join ' ') failed (exit code $script:NativeExit)"
   }
-  return $code
+}
+
+function Stop-ServerOnPort($portNumber) {
+  try {
+    $conns = Get-NetTCPConnection -LocalPort $portNumber -State Listen -ErrorAction SilentlyContinue
+    if ($conns) {
+      $conns | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object {
+        try { Stop-Process -Id $_ -Force -ErrorAction Stop; Write-Ok "Stopped process $_ on port $portNumber" }
+        catch { Write-Warn "Could not stop process $_ (it may have already exited)" }
+      }
+      return
+    }
+  } catch {
+    # Get-NetTCPConnection missing on minimal/older systems - fall back to netstat.
+    try {
+      $lines = netstat -ano -p tcp 2>$null | Select-String ":$portNumber\s.*LISTENING"
+      $pids  = $lines | ForEach-Object { ($_ -split '\s+')[-1] } | Sort-Object -Unique
+      foreach ($procId in $pids) {
+        if ($procId -match '^\d+$') {
+          try { Stop-Process -Id $procId -Force -ErrorAction Stop; Write-Ok "Stopped process $procId on port $portNumber" }
+          catch { Write-Warn "Could not stop process $procId" }
+        }
+      }
+      return
+    } catch { }
+  }
+  Write-Ok "No server was running on port $portNumber"
 }
 
 Write-Host "Claude Key Pool updater" -ForegroundColor White
 
 # --- Locate the install ---------------------------------------------------
+# If there's no install yet, don't error out - fall back to a full install so
+# a user who runs update first still ends up with a working app.
 if (-not (Test-Path (Join-Path $InstallToDir '.git'))) {
-  Write-Err "No existing install found at $InstallToDir"
-  throw "Run the installer first: irm https://raw.githubusercontent.com/Ns81000/claude-key-pool/main/install.ps1 | iex"
+  Write-Warn "No existing install found at $InstallToDir"
+  Write-Step 'Running the installer instead'
+  Invoke-Expression (Invoke-RestMethod 'https://raw.githubusercontent.com/Ns81000/claude-key-pool/main/install.ps1')
+  return
 }
 Set-Location $InstallToDir
 Write-Ok "Found installation at $InstallToDir"
@@ -63,58 +95,28 @@ if (-not (Test-Command git))  { throw "git is not installed. Install it first: w
 if (-not (Test-Command node)) { throw "Node.js is not installed. Install it first: winget install --id OpenJS.NodeJS.LTS -e" }
 if (-not (Test-Command pnpm)) {
   Write-Warn 'pnpm not found - enabling it via corepack'
-  Invoke-Native corepack @('enable', 'pnpm') -AllowFail | Out-Null
-  Invoke-Native corepack @('prepare', 'pnpm@latest', '--activate') -AllowFail | Out-Null
+  Invoke-Native corepack @('enable', 'pnpm') -AllowFail
+  Invoke-Native corepack @('prepare', 'pnpm@latest', '--activate') -AllowFail
   $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
               [System.Environment]::GetEnvironmentVariable('Path', 'User')
 }
 if (-not (Test-Command pnpm)) { throw "pnpm could not be enabled. Install it manually: npm install -g pnpm" }
 
 # --- Stop a running server ------------------------------------------------
-# Free port 9999 so the rebuild and relaunch don't collide with a live server.
 Write-Step "Stopping any running server on port $Port"
-try {
-  $conns = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-  if ($conns) {
-    $conns | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object {
-      try {
-        Stop-Process -Id $_ -Force -ErrorAction Stop
-        Write-Ok "Stopped process $_"
-      } catch {
-        Write-Warn "Could not stop process $_ (it may have already exited)"
-      }
-    }
-  } else {
-    Write-Ok "No server was running"
-  }
-} catch {
-  # Get-NetTCPConnection is unavailable on some minimal/older systems - fall back.
-  Write-Warn "Port check unavailable ($($_.Exception.Message)); attempting netstat fallback"
-  try {
-    $lines = netstat -ano -p tcp | Select-String ":$Port\s.*LISTENING"
-    $pids  = $lines | ForEach-Object { ($_ -split '\s+')[-1] } | Sort-Object -Unique
-    foreach ($procId in $pids) {
-      if ($procId -match '^\d+$') {
-        try { Stop-Process -Id $procId -Force -ErrorAction Stop; Write-Ok "Stopped process $procId" }
-        catch { Write-Warn "Could not stop process $procId" }
-      }
-    }
-    if (-not $pids) { Write-Ok "No server was running" }
-  } catch {
-    Write-Warn "Could not check port $Port (continuing anyway)"
-  }
-}
+Stop-ServerOnPort $Port
 
 # --- Pull latest ----------------------------------------------------------
-# Force-sync the working tree to origin/$Branch. This handles the common cases
-# that broke --ff-only before: local edits to tracked files, untracked files
+# Force-sync the working tree to origin/$Branch. This handles the cases that
+# broke --ff-only before: local edits to tracked files, untracked files
 # blocking a checkout, and divergent history. git-ignored files (config.json,
-# config.backup.json) are never touched by reset/clean, so your keys are safe.
+# config.backup.json) are never touched by reset, and we explicitly exclude
+# them from clean, so your saved keys are always safe.
 Write-Step "Pulling the latest code from '$Branch'"
 Invoke-Native git @('fetch', '--prune', 'origin')
-Invoke-Native git @('checkout', '-f', $Branch) -AllowFail | Out-Null
+Invoke-Native git @('checkout', '-f', $Branch) -AllowFail
 Invoke-Native git @('reset', '--hard', "origin/$Branch")
-Invoke-Native git @('clean', '-fd')
+Invoke-Native git @('clean', '-fd', '-e', 'config.json', '-e', 'config.backup.json')
 Write-Ok "Successfully synced to latest code"
 Write-Ok "Current version: $(git log -1 --oneline)"
 
@@ -140,5 +142,7 @@ Write-Host "`nUpdated successfully!" -ForegroundColor Green
 Write-Host "Current version: $(git log -1 --oneline)" -ForegroundColor Green
 Write-Host "`nLaunching the dashboard..." -ForegroundColor White
 
-Start-Sleep -Milliseconds 500
-& $launcher
+# Launch in its OWN new console window and return immediately. Using & here
+# would host the batch file inside this PowerShell session and trigger a
+# "Terminate batch job (Y/N)?" prompt - the exact issue seen before.
+Start-Process -FilePath $launcher -WorkingDirectory $InstallToDir

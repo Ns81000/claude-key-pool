@@ -7,15 +7,26 @@ echo   Starting server on http://localhost:9999
 echo   (Keep this window open. Close it to stop the proxy.)
 echo.
 
-rem Start the production server in this window's background job, then wait for
-rem the port to answer before opening the browser.
-start "" /min cmd /c "pnpm start"
+rem Make sure pnpm is available when launched directly (double-click).
+where pnpm >nul 2>nul
+if errorlevel 1 (
+  echo   ERROR: pnpm was not found on your PATH.
+  echo   Re-run the installer, or install pnpm with: npm install -g pnpm
+  echo.
+  pause
+  exit /b 1
+)
 
-powershell -NoProfile -Command "$ok=$false; for($i=0;$i -lt 60;$i++){ try{ Invoke-WebRequest -UseBasicParsing http://localhost:9999 -TimeoutSec 2 ^| Out-Null; $ok=$true; break }catch{ Start-Sleep -Milliseconds 500 } }; if(-not $ok){ Write-Host 'Server did not respond in time; opening anyway.' }"
+rem Open the browser once the server answers - done in a background child so the
+rem server itself can own THIS window's foreground. That way closing this window
+rem actually stops the proxy, exactly as the message above promises.
+start "" /min powershell -NoProfile -ExecutionPolicy Bypass -Command "for($i=0;$i -lt 60;$i++){ try{ Invoke-WebRequest -UseBasicParsing http://localhost:9999 -TimeoutSec 2 ^| Out-Null; Start-Process 'http://localhost:9999'; break }catch{ Start-Sleep -Milliseconds 500 } }"
 
-start "" http://localhost:9999
+rem Run the production server in the FOREGROUND of this window. When this window
+rem is closed (or the server exits), the proxy stops.
+call pnpm start
 
 echo.
-echo   Dashboard opened in your browser.
-echo   To stop the proxy: close this window, or use the Quit button in the UI.
+echo   The server has stopped. You can close this window.
 echo.
+pause
