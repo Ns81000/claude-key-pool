@@ -146,3 +146,7 @@ Write-Host "`nLaunching the dashboard..." -ForegroundColor White
 # would host the batch file inside this PowerShell session and trigger a
 # "Terminate batch job (Y/N)?" prompt - the exact issue seen before.
 Start-Process -FilePath $launcher -WorkingDirectory $InstallToDir
+
+# This script runs inside the user's own PowerShell session (irm | iex), so it
+# must not call exit - that would kill their terminal. Just tell them it's safe.
+Write-Host "`nAll done - you can close this window now." -ForegroundColor Green

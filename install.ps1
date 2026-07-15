@@ -186,3 +186,7 @@ if (Test-Path $launcher) {
 } else {
   Write-Err "Launcher not found at $launcher - the build may be incomplete."
 }
+
+# This script runs inside the user's own PowerShell session (irm | iex), so it
+# must not call exit - that would kill their terminal. Just tell them it's safe.
+Write-Host "`nAll done - you can close this window now." -ForegroundColor Green
