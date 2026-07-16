@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 
 export type KeyStatus = 'active' | 'rate-limited' | 'invalid';
 
@@ -42,7 +43,7 @@ const CONFIG_FILE_PATH = path.join(process.cwd(), 'config.json');
 const CONFIG_TMP_PATH = CONFIG_FILE_PATH + '.tmp';
 const CONFIG_BACKUP_PATH = path.join(process.cwd(), 'config.backup.json');
 const CLAUDE_SETTINGS_PATH =
-  process.env.CLAUDE_SETTINGS_PATH || 'C:/Users/Ns8pc/.claude/settings.json';
+  process.env.CLAUDE_SETTINGS_PATH || path.join(os.homedir(), '.claude', 'settings.json');
 
 const DEFAULT_CONFIG: AppConfig = {
   activeGroupId: null,
