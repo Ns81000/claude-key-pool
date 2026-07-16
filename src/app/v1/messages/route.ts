@@ -75,6 +75,10 @@ export async function POST(req: NextRequest) {
       });
     } catch (err) {
       clearTimeout(connectTimer);
+      if (req.signal.aborted) {
+        console.warn(`Client aborted request during fetch for ${key.email}. Stopping rotation.`);
+        break;
+      }
       console.warn(`Key ${key.email}: upstream fetch failed (transient). Rotating.`, err);
       transientFailures++;
       continue;

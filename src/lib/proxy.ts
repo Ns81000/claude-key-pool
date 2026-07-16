@@ -42,13 +42,20 @@ export function isLimitError(errType?: string, errMsg?: string): boolean {
 // Inspect a decoded error payload (from JSON body or an SSE error event).
 export function classifyErrorPayload(payload: unknown): boolean {
   if (!payload || typeof payload !== 'object') return false;
-  const err = (payload as { error?: { type?: string; message?: string } }).error;
+  const err = (payload as { error?: unknown }).error;
   if (!err) {
     // Some upstreams put type/message at the top level.
     const top = payload as { type?: string; message?: string };
     return isLimitError(top.type, top.message);
   }
-  return isLimitError(err.type, err.message);
+  if (typeof err === 'string') {
+    return isLimitError(undefined, err);
+  }
+  if (typeof err === 'object') {
+    const obj = err as { type?: string; message?: string };
+    return isLimitError(obj.type, obj.message);
+  }
+  return false;
 }
 
 // Compute cooldown end (ms epoch) from response headers, honoring retry-after

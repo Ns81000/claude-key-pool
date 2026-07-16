@@ -44,8 +44,12 @@ export async function GET(req: NextRequest) {
         headers: buildUpstreamHeaders(req.headers, key.key),
         signal: controller.signal,
       });
-    } catch {
+    } catch (err) {
       clearTimeout(timer);
+      if (req.signal.aborted) {
+        console.warn(`Client aborted request during models fetch for ${key.email}. Stopping rotation.`);
+        break;
+      }
       transientFailures++;
       continue;
     }
