@@ -11,7 +11,8 @@ import {
 // produces no bytes for STALL_TIMEOUT_MS.
 export const CONNECT_TIMEOUT_MS = 30_000;
 export const STALL_TIMEOUT_MS = 120_000;
-export const DEFAULT_COOLDOWN_MS = 60_000;
+export const DEFAULT_COOLDOWN_MS = 14_400_000; // 4 hours
+export const SLOW_KEY_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
 
 // How much of a stream we are willing to buffer while looking for an early
 // error event before we give up and start forwarding to the client.
@@ -90,10 +91,30 @@ export function computeCooldownUntil(headers: Headers): number {
 // Round-robin over currently-active keys. Uses runtime state only.
 export function selectActiveKeys(group: GroupConfig): KeyConfig[] {
   const active = group.keys.filter((k) => getKeyState(k.id).status === 'active');
-  if (active.length <= 1) return active;
-  const start = proxyState.rrCursor % active.length;
-  proxyState.rrCursor = (proxyState.rrCursor + 1) % active.length;
-  return [...active.slice(start), ...active.slice(0, start)];
+  if (active.length === 0) return [];
+
+  const now = Date.now();
+  const fast: KeyConfig[] = [];
+  const slow: KeyConfig[] = [];
+
+  for (const k of active) {
+    const st = getKeyState(k.id);
+    const lastTimeout = st.lastTimeoutTime || 0;
+    // Keys that timed out in the last SLOW_KEY_WINDOW_MS are treated as slow
+    if (now - lastTimeout < SLOW_KEY_WINDOW_MS) {
+      slow.push(k);
+    } else {
+      fast.push(k);
+    }
+  }
+
+  // Prioritize fast keys; fall back to slow keys only if no fast keys exist
+  const candidates = fast.length > 0 ? fast : slow;
+
+  if (candidates.length <= 1) return candidates;
+  const start = proxyState.rrCursor % candidates.length;
+  proxyState.rrCursor = (proxyState.rrCursor + 1) % candidates.length;
+  return [...candidates.slice(start), ...candidates.slice(0, start)];
 }
 
 // Build the upstream request headers: copy client headers minus hop-by-hop and

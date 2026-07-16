@@ -54,9 +54,10 @@ const DEFAULT_CONFIG: AppConfig = {
 
 // Volatile runtime state — the source of truth for rotation while the server
 // runs. Never persisted. Kept on `global` so it survives Next dev hot-reloads.
-interface RuntimeKeyState {
+export interface RuntimeKeyState {
   status: KeyStatus;
   cooldownUntil: number | null; // ms epoch, only meaningful when rate-limited
+  lastTimeoutTime?: number;
 }
 
 interface GlobalProxyState {
@@ -164,6 +165,11 @@ export function markInvalid(keyId: string): void {
   const st = getKeyState(keyId);
   st.status = 'invalid';
   st.cooldownUntil = null;
+}
+
+export function markKeySlow(keyId: string): void {
+  const st = getKeyState(keyId);
+  st.lastTimeoutTime = Date.now();
 }
 
 export function keyStatusView(keyId: string): { status: KeyStatus; cooldownUntil: string | null } {
