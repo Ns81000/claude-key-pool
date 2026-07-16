@@ -202,31 +202,9 @@ function maskKey(key: string): string {
   return `${key.slice(0, 8)}····${key.slice(-4)}`;
 }
 
-function parseLimitStr(str: string): number | undefined {
-  const clean = str.trim().toLowerCase();
-  if (!clean) return undefined;
-  
-  const match = clean.match(/^([\d.]+)\s*([km])?$/);
-  if (!match) return undefined;
-  
-  const val = parseFloat(match[1]);
-  if (isNaN(val)) return undefined;
-  
-  const unit = match[2];
-  if (unit === 'm') return val * 1_000_000;
-  if (unit === 'k') return val * 1_000;
-  return val;
-}
-
-function formatTokens(num: number): string {
-  if (num >= 1_000_000) {
-    return `${(num / 1_000_000).toFixed(1)}M`;
-  }
-  if (num >= 1_000) {
-    return `${(num / 1_000).toFixed(1)}k`;
-  }
-  return String(num);
-}
+// ---------------------------------------------------------------------------
+// Main page
+// ---------------------------------------------------------------------------
 
 export default function Home() {
   const [config, setConfig] = useState<AppConfigView | null>(null);
@@ -240,7 +218,6 @@ export default function Home() {
 
   const [newKeyEmail, setNewKeyEmail] = useState('');
   const [newKeyValue, setNewKeyValue] = useState('');
-  const [newKeyLimitStr, setNewKeyLimitStr] = useState('');
   const urlDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const pushToast = useCallback((message: string, tone: Toast['tone'] = 'default') => {
@@ -396,17 +373,12 @@ export default function Home() {
       return;
     }
 
-    const parsedLimit = parseLimitStr(newKeyLimitStr);
-
     const newKey: KeyView = {
       id: genId('key'),
       email: newKeyEmail.trim() || 'Unlabeled key',
       key: value,
       status: 'active',
       cooldownUntil: null,
-      inputTokens: 0,
-      outputTokens: 0,
-      limit: parsedLimit,
     };
     const groups = config.groups.map((g) =>
       g.id === activeGroup.id ? { ...g, keys: [...g.keys, newKey] } : g,
@@ -415,7 +387,6 @@ export default function Home() {
       await saveGroups(groups);
       setNewKeyEmail('');
       setNewKeyValue('');
-      setNewKeyLimitStr('');
       pushToast('Key added');
     } catch (err) {
       pushToast(err instanceof Error ? err.message : 'Error', 'error');
@@ -671,9 +642,9 @@ export default function Home() {
               <form onSubmit={addKey} className="flex flex-col gap-3">
                 <h2 className="text-[18px] font-medium text-ink">Add a key</h2>
                 <div className="flex flex-col sm:flex-row gap-3">
-                  <div className="sm:w-1/4">
+                  <div className="sm:w-1/3">
                     <TextInput
-                      placeholder="Label (optional)"
+                      placeholder="Email / label (optional)"
                       value={newKeyEmail}
                       onChange={(e) => setNewKeyEmail(e.target.value)}
                       {...noAutofill}
@@ -687,14 +658,6 @@ export default function Home() {
                       mono
                       required
                       {...secretAutofill}
-                    />
-                  </div>
-                  <div className="sm:w-1/4">
-                    <TextInput
-                      placeholder="Limit (optional, e.g. 5M)"
-                      value={newKeyLimitStr}
-                      onChange={(e) => setNewKeyLimitStr(e.target.value)}
-                      {...noAutofill}
                     />
                   </div>
                   <Button type="submit" variant="primary" disabled={!newKeyValue.trim()}>
@@ -726,29 +689,10 @@ export default function Home() {
                         }`}
                       >
                         <div className="flex-1 min-w-0">
-                          <div className="flex items-baseline justify-between gap-2">
-                            <span className="text-[14px] text-ink truncate font-medium">{key.email}</span>
-                            <span className="text-[12px] text-muted shrink-0 tracking-tight">
-                              {formatTokens(key.inputTokens + key.outputTokens)} {key.limit ? `/ ${formatTokens(key.limit)}` : 'tokens used'}
-                            </span>
-                          </div>
-                          <div className="text-[13px] font-mono text-muted truncate mt-0.5">
+                          <div className="text-[14px] text-ink truncate">{key.email}</div>
+                          <div className="text-[13px] font-mono text-muted truncate">
                             {maskKey(key.key)}
                           </div>
-                          {key.limit ? (
-                            <div className="w-full bg-[color:var(--color-status-ready-bg)]/20 h-1.5 rounded-full mt-2 overflow-hidden border border-hairline relative">
-                              <div
-                                className={`h-full rounded-full transition-all duration-300 ${
-                                  (key.inputTokens + key.outputTokens) / key.limit >= 0.9
-                                    ? 'bg-[color:var(--color-status-invalid)]'
-                                    : (key.inputTokens + key.outputTokens) / key.limit >= 0.75
-                                    ? 'bg-[color:var(--color-status-limited)]'
-                                    : 'bg-[color:var(--color-status-ready)]'
-                                }`}
-                                style={{ width: `${Math.min(100, ((key.inputTokens + key.outputTokens) / key.limit) * 100)}%` }}
-                              />
-                            </div>
-                          ) : null}
                         </div>
                         <StatusChip status={key.status} cooldownUntil={key.cooldownUntil} />
                         <button
