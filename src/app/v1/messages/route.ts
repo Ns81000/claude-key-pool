@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { loadConfig, markInvalid, markKeySlow, markLimited } from '@/lib/config';
+import { loadConfig, markInvalid, markKeySlow, markLimited, recordTokenUsage } from '@/lib/config';
 import {
   CONNECT_TIMEOUT_MS,
   buildResponseHeaders,
@@ -9,6 +9,7 @@ import {
   limitKeyFromHeaders,
   peekStreamForLimit,
   selectActiveKeys,
+  trackStreamUsage,
 } from '@/lib/proxy';
 
 export const dynamic = 'force-dynamic';
@@ -149,11 +150,19 @@ export async function POST(req: NextRequest) {
           console.warn(`Key ${key.email}: mid-stream limit before content. Rotating.`);
           continue;
         }
-        return new Response(peek.stream, {
+        return new Response(trackStreamUsage(peek.stream!, key.id), {
           status: 200,
           headers: buildResponseHeaders(upstream, true),
         });
       }
+
+      // Record usage asynchronously to avoid blocking client latency
+      upstream.clone().json().then((payload) => {
+        if (payload && typeof payload === 'object' && (payload as any).usage) {
+          const usage = (payload as any).usage;
+          recordTokenUsage(key.id, usage.input_tokens || 0, usage.output_tokens || 0);
+        }
+      }).catch(() => {});
 
       return new Response(upstream.body, {
         status: upstream.status,

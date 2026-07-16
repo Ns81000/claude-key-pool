@@ -23,6 +23,7 @@ function sanitizeGroups(groups: unknown): GroupConfig[] {
           id: String(k.id),
           email: String(k.email ?? ''),
           key: String(k.key ?? ''),
+          limit: k.limit !== undefined ? Number(k.limit) : undefined,
         }))
       : [],
   }));

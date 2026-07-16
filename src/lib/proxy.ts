@@ -4,6 +4,7 @@ import {
   getKeyState,
   markLimited,
   proxyState,
+  recordTokenUsage,
 } from './config';
 
 // Connect / first-byte timeout. There is intentionally no hard cap on total
@@ -295,4 +296,71 @@ export async function peekStreamForLimit(
 // Mark a key limited from response headers (429 or classified error body).
 export function limitKeyFromHeaders(keyId: string, headers: Headers): void {
   markLimited(keyId, computeCooldownUntil(headers));
+}
+
+function parseSseLineForUsage(line: string, keyId: string) {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith('data:')) return;
+  const jsonStr = trimmed.slice(5).trim();
+  if (!jsonStr || jsonStr === '[DONE]') return;
+  try {
+    const obj = JSON.parse(jsonStr);
+    if (obj.usage) {
+      const input = obj.usage.input_tokens || 0;
+      const output = obj.usage.output_tokens || 0;
+      if (input > 0 || output > 0) {
+        recordTokenUsage(keyId, input, output);
+      }
+    } else if (obj.message?.usage) {
+      const input = obj.message.usage.input_tokens || 0;
+      const output = obj.message.usage.output_tokens || 0;
+      if (input > 0 || output > 0) {
+        recordTokenUsage(keyId, input, output);
+      }
+    }
+  } catch {
+    // Ignore partial lines at chunk boundaries
+  }
+}
+
+export function trackStreamUsage(
+  stream: ReadableStream<Uint8Array>,
+  keyId: string
+): ReadableStream<Uint8Array> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          if (buffer.trim()) {
+            parseSseLineForUsage(buffer, keyId);
+          }
+          controller.close();
+          return;
+        }
+        if (value) {
+          controller.enqueue(value);
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          for (const line of lines) {
+            parseSseLineForUsage(line, keyId);
+          }
+        }
+      } catch (err) {
+        controller.error(err);
+      }
+    },
+    async cancel(reason) {
+      try {
+        await reader.cancel(reason);
+      } catch {
+        /* ignore */
+      }
+    }
+  });
 }

@@ -9,6 +9,7 @@ export interface KeyConfig {
   id: string;
   email: string;
   key: string;
+  limit?: number;
 }
 
 export interface GroupConfig {
@@ -29,6 +30,8 @@ export interface AppConfig {
 export interface KeyView extends KeyConfig {
   status: KeyStatus;
   cooldownUntil: string | null;
+  inputTokens: number;
+  outputTokens: number;
 }
 
 export interface GroupView extends Omit<GroupConfig, 'keys'> {
@@ -58,6 +61,8 @@ export interface RuntimeKeyState {
   status: KeyStatus;
   cooldownUntil: number | null; // ms epoch, only meaningful when rate-limited
   lastTimeoutTime?: number;
+  inputTokens: number;
+  outputTokens: number;
 }
 
 interface GlobalProxyState {
@@ -85,6 +90,47 @@ if (!globalForProxy.proxyState) {
 }
 export const proxyState = globalForProxy.proxyState;
 
+const USAGE_FILE_PATH = path.join(process.cwd(), 'token_usage.json');
+
+function loadPersistedUsage(): Record<string, { inputTokens: number; outputTokens: number }> {
+  try {
+    if (fs.existsSync(USAGE_FILE_PATH)) {
+      const data = fs.readFileSync(USAGE_FILE_PATH, 'utf-8');
+      return JSON.parse(data);
+    }
+  } catch (err) {
+    // ignore
+  }
+  return {};
+}
+
+const persistedUsage = loadPersistedUsage();
+let saveTimeout: NodeJS.Timeout | null = null;
+
+function scheduleUsageSave() {
+  if (saveTimeout) return;
+  saveTimeout = setTimeout(() => {
+    saveTimeout = null;
+    try {
+      fs.writeFileSync(USAGE_FILE_PATH, JSON.stringify(persistedUsage, null, 2), 'utf-8');
+    } catch (err) {
+      console.error('Error writing token_usage.json:', err);
+    }
+  }, 5000);
+}
+
+export function recordTokenUsage(keyId: string, input: number, output: number) {
+  const st = getKeyState(keyId);
+  st.inputTokens += input;
+  st.outputTokens += output;
+
+  persistedUsage[keyId] = {
+    inputTokens: st.inputTokens,
+    outputTokens: st.outputTokens,
+  };
+  scheduleUsageSave();
+}
+
 function readConfigFromDisk(): AppConfig {
   try {
     if (fs.existsSync(CONFIG_FILE_PATH)) {
@@ -101,6 +147,7 @@ function readConfigFromDisk(): AppConfig {
           id: String(k.id),
           email: String(k.email ?? ''),
           key: String(k.key ?? ''),
+          limit: k.limit !== undefined ? Number(k.limit) : undefined,
         })),
       }));
       return {
@@ -144,7 +191,13 @@ export function loadConfig(): AppConfig {
 export function getKeyState(keyId: string): RuntimeKeyState {
   let st = proxyState.keys[keyId];
   if (!st) {
-    st = { status: 'active', cooldownUntil: null };
+    const saved = persistedUsage[keyId] || { inputTokens: 0, outputTokens: 0 };
+    st = {
+      status: 'active',
+      cooldownUntil: null,
+      inputTokens: saved.inputTokens,
+      outputTokens: saved.outputTokens,
+    };
     proxyState.keys[keyId] = st;
   }
   // Auto-recover from cooldown.
@@ -172,11 +225,18 @@ export function markKeySlow(keyId: string): void {
   st.lastTimeoutTime = Date.now();
 }
 
-export function keyStatusView(keyId: string): { status: KeyStatus; cooldownUntil: string | null } {
+export function keyStatusView(keyId: string): {
+  status: KeyStatus;
+  cooldownUntil: string | null;
+  inputTokens: number;
+  outputTokens: number;
+} {
   const st = getKeyState(keyId);
   return {
     status: st.status,
     cooldownUntil: st.cooldownUntil ? new Date(st.cooldownUntil).toISOString() : null,
+    inputTokens: st.inputTokens,
+    outputTokens: st.outputTokens,
   };
 }
 
