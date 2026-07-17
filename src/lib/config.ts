@@ -165,14 +165,20 @@ export function loadConfig(): AppConfig {
 
 // Runtime state helpers ------------------------------------------------------
 
+const INVALID_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour auto-recovery for invalid keys
+
 export function getKeyState(keyId: string): RuntimeKeyState {
   let st = proxyState.keys[keyId];
   if (!st) {
     st = { status: 'active', cooldownUntil: null, inFlight: 0 };
     proxyState.keys[keyId] = st;
   }
-  // Auto-recover from cooldown.
-  if (st.status === 'rate-limited' && st.cooldownUntil && Date.now() > st.cooldownUntil) {
+  // Auto-recover from cooldown (both rate-limited and invalid keys).
+  if (
+    (st.status === 'rate-limited' || st.status === 'invalid') &&
+    st.cooldownUntil &&
+    Date.now() > st.cooldownUntil
+  ) {
     st.status = 'active';
     st.cooldownUntil = null;
   }
@@ -188,7 +194,9 @@ export function markLimited(keyId: string, cooldownUntilMs: number): void {
 export function markInvalid(keyId: string): void {
   const st = getKeyState(keyId);
   st.status = 'invalid';
-  st.cooldownUntil = null;
+  // Auto-recover after 1 hour. Truly dead keys (revoked/deleted) will just
+  // get re-flagged on the next request attempt.
+  st.cooldownUntil = Date.now() + INVALID_COOLDOWN_MS;
 }
 
 export function markProviderError(keyId: string): void {

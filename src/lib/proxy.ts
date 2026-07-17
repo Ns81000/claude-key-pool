@@ -26,26 +26,29 @@ const LIMIT_ERROR_SUBSTRINGS = [
   'rate limit',
   'too many requests',
   'usage limit',
+  'usage limit reached',
   'token limit',
   'overloaded',
   'concurrency',
   'throttled',
+  'payment required',
 ];
 
 // Strings/types that mean "this key is invalid/revoked/billing failed → do not use".
-const INVALID_ERROR_TYPES = ['invalid_request_error', 'authentication_error', 'permission_error'];
+// NOTE: 'invalid_request_error' is intentionally NOT here — it means "bad request
+// parameters" (e.g. unsupported model), not "dead key". Including it would cause
+// a cascade where every key gets permanently invalidated when a client sends an
+// unsupported model name.
+const INVALID_ERROR_TYPES = ['authentication_error', 'permission_error'];
 const INVALID_ERROR_SUBSTRINGS = [
   'invalid api key',
   'invalid key',
   'key is invalid',
   'unauthorized',
-  'forbidden',
   'revoked',
   'disabled',
   'deleted',
   'inactive key',
-  'permission',
-  'scope',
   'insufficient credit',
   'insufficient balance',
   'out of credit',
@@ -53,7 +56,6 @@ const INVALID_ERROR_SUBSTRINGS = [
   'quota exceeded',
   'credit card',
   'billing status',
-  'payment required',
 ];
 
 export function isLimitError(errType?: string, errMsg?: string): boolean {
@@ -338,6 +340,17 @@ export async function peekStreamForLimit(
   const body = upstream.body;
   if (!body) return { limited: false, stream: null };
 
+  // Bug #4 fix: if the upstream sent a compressed response despite our
+  // accept-encoding: identity header, we cannot text-decode the stream to
+  // detect SSE error frames. Skip the peek and forward the raw stream with
+  // stall protection. The key will still get marked limited on the *next*
+  // request if needed.
+  const encoding = (upstream.headers.get('content-encoding') || '').toLowerCase();
+  if (encoding && encoding !== 'identity') {
+    const reader = body.getReader();
+    return { limited: false, stream: createStallProtectedStream(reader) };
+  }
+
   const reader = body.getReader();
   const decoder = new TextDecoder();
   const headChunks: Uint8Array[] = [];
@@ -361,7 +374,6 @@ export async function peekStreamForLimit(
       bufferedBytes += chunk.value.byteLength;
       headText += decoder.decode(chunk.value, { stream: true });
 
-      // Bug #4 fix: use JSON-parsed detection instead of raw substring search.
       const result = detectLimitInSseText(headText);
       if (result.limited) {
         limited = true;
@@ -384,7 +396,7 @@ export async function peekStreamForLimit(
     return { limited: true, stream: null };
   }
 
-  // Replay buffered head, then pipe the remainder with stall timeout (Bug #11 fix).
+  // Replay buffered head, then pipe the remainder with stall timeout.
   const stream = createStallProtectedStream(reader, headChunks);
 
   return { limited: false, stream };

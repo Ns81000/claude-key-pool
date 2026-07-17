@@ -361,7 +361,9 @@
     <div class="rot reveal">
       <div class="row"><div class="c k">429 (key-level)</div><div class="c v">Mark key rate-limited, honor retry-after, rotate</div></div>
       <div class="row"><div class="c k">429 (IP-level)</div><div class="c v">Rotate to next key without cooling down the current one</div></div>
-      <div class="row"><div class="c k">401 / 403</div><div class="c v">Mark key invalid (won't auto-recover), rotate</div></div>
+      <div class="row"><div class="c k">401 Unauthorized</div><div class="c v">Mark key invalid (auto-recovers after 1 hour), rotate</div></div>
+      <div class="row"><div class="c k">403 Forbidden</div><div class="c v">Transient provider error (5-min cooldown), rotate</div></div>
+      <div class="row"><div class="c k">400 invalid_request_error</div><div class="c v">Client error (e.g. bad model name) — returned cleanly to client</div></div>
       <div class="row"><div class="c k">rate_limit / overloaded / quota</div><div class="c v">Mark limited, rotate to the next key</div></div>
       <div class="row"><div class="c k">SSE error before any content</div><div class="c v">Silently retry — client sees one clean stream</div></div>
       <div class="row"><div class="c k">SSE error after content started</div><div class="c v">Forward as-is, mark limited so the next request rotates</div></div>

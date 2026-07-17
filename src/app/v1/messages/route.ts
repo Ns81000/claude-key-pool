@@ -152,11 +152,22 @@ export async function POST(req: NextRequest) {
       continue;
     }
 
-    // Auth failure → invalid, do not auto-recover, rotate.
-    if (upstream.status === 401 || upstream.status === 403) {
+    // 401 → unambiguous auth failure, key is invalid.
+    if (upstream.status === 401) {
       markInvalid(key.id);
       decrementInFlight(key.id);
-      logRotation(reqId, key.email, `${upstream.status} → key invalid (auth failure)`);
+      logRotation(reqId, key.email, `401 → key invalid (auth failure)`);
+      continue;
+    }
+
+    // 403 → often transient (Cloudflare, WAF, CDN challenges on third-party
+    // upstreams). Treat as a provider error with a short cooldown, not permanent
+    // invalidation.
+    if (upstream.status === 403) {
+      markProviderError(key.id);
+      decrementInFlight(key.id);
+      logRotation(reqId, key.email, `403 → provider error (transient, 5-min cooldown)`);
+      totalTransientFailures++;
       continue;
     }
 

@@ -129,10 +129,18 @@ export async function GET(req: NextRequest) {
       continue;
     }
 
-    if (upstream.status === 401 || upstream.status === 403) {
+    if (upstream.status === 401) {
       markInvalid(key.id);
       decrementInFlight(key.id);
-      logRotation(reqId, key.email, `${upstream.status} → key invalid (auth failure)`);
+      logRotation(reqId, key.email, `401 → key invalid (auth failure)`);
+      continue;
+    }
+
+    if (upstream.status === 403) {
+      markProviderError(key.id);
+      decrementInFlight(key.id);
+      logRotation(reqId, key.email, `403 → provider error (transient, 5-min cooldown)`);
+      totalTransientFailures++;
       continue;
     }
 

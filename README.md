@@ -110,7 +110,9 @@ For development with hot reload: `pnpm dev`.
 |---|---|
 | `429 Too Many Requests` (key-level) | Mark key rate-limited, honor `retry-after`, rotate |
 | `429 Too Many Requests` (IP-level) | Rotate to next key **without** cooling down the current one |
-| `401` / `403` | Mark key **invalid** (won't auto-recover — fix the key), rotate |
+| `401 Unauthorized` | Mark key **invalid** (auto-recovers after 1 hour), rotate |
+| `403 Forbidden` | Transient provider error (5-min cooldown), rotate |
+| `400 invalid_request_error` | Client error (e.g. bad model name) — returned cleanly to client, keys NOT killed |
 | Error body: `rate_limit_error`, `overloaded_error`, quota/credit/usage/token limit | Mark limited, rotate |
 | SSE error event **before** any content | Silently retry next key — client sees one clean stream |
 | SSE error event **after** content started | Forward as-is (can't swap mid-answer), but mark limited so the *next* request rotates |
