@@ -11,8 +11,10 @@ import {
   AlertTriangle,
   Circle,
   Power,
+  Zap,
+  Activity,
 } from 'lucide-react';
-import type { AppConfigView, GroupView, KeyView } from '@/lib/config';
+import type { AppConfigView, GroupView, KeyView, PoolStats } from '@/lib/config';
 
 // ---------------------------------------------------------------------------
 // Small primitives
@@ -74,7 +76,7 @@ function TextInput({
   );
 }
 
-function StatusChip({ status, cooldownUntil }: { status: string; cooldownUntil: string | null }) {
+function StatusChip({ status, cooldownUntil, inFlight }: { status: string; cooldownUntil: string | null; inFlight: number }) {
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
     if (status !== 'rate-limited' || !cooldownUntil) return;
@@ -107,7 +109,71 @@ function StatusChip({ status, cooldownUntil }: { status: string; cooldownUntil: 
     <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[6px] text-[12px] font-medium bg-[color:var(--color-status-ready-bg)] text-[color:var(--color-status-ready)]">
       <Check className="w-3.5 h-3.5" />
       Ready
+      {inFlight > 0 && (
+        <span className="ml-1 inline-flex items-center gap-0.5 text-[11px] text-[color:var(--color-status-limited)]">
+          <Zap className="w-3 h-3" />
+          {inFlight}
+        </span>
+      )}
     </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Pool stats banner
+// ---------------------------------------------------------------------------
+
+function PoolStatsBanner({ stats }: { stats: PoolStats }) {
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+      <StatCard label="Total Keys" value={stats.totalKeys} />
+      <StatCard
+        label="Active"
+        value={stats.activeKeys}
+        color="var(--color-status-ready)"
+      />
+      <StatCard
+        label="Rate-Limited"
+        value={stats.rateLimitedKeys}
+        color="var(--color-status-limited)"
+      />
+      <StatCard
+        label="Invalid"
+        value={stats.invalidKeys}
+        color="var(--color-status-invalid)"
+      />
+      <StatCard
+        label="In-Flight"
+        value={stats.totalInFlight}
+        color="var(--color-status-limited)"
+        icon={<Activity className="w-3.5 h-3.5" />}
+      />
+    </div>
+  );
+}
+
+function StatCard({
+  label,
+  value,
+  color,
+  icon,
+}: {
+  label: string;
+  value: number;
+  color?: string;
+  icon?: React.ReactNode;
+}) {
+  return (
+    <div className="flex flex-col gap-1 p-3 rounded-[10px] border border-hairline bg-surface-soft">
+      <span className="text-[12px] text-muted font-medium">{label}</span>
+      <span
+        className="text-[22px] font-medium leading-none flex items-center gap-1.5"
+        style={color ? { color } : undefined}
+      >
+        {icon}
+        {value}
+      </span>
+    </div>
   );
 }
 
@@ -259,16 +325,18 @@ export default function Home() {
     (g) => g.id === config.activeGroupId,
   );
 
-  // Poll status only while a key is in cooldown, to keep the countdown live.
-  const hasCooldown = useMemo(
-    () => activeGroup?.keys.some((k) => k.status === 'rate-limited') ?? false,
-    [activeGroup],
-  );
+  // Bug #12 fix: always poll every 5 seconds (with visibility check), not just
+  // when a cooldown is active. This ensures state changes from proxy activity
+  // are reflected even when all keys were previously "Ready".
   useEffect(() => {
-    if (!hasCooldown) return;
-    const t = setInterval(() => fetchConfig(), 4000);
+    function poll() {
+      if (document.visibilityState === 'visible') {
+        fetchConfig();
+      }
+    }
+    const t = setInterval(poll, 5000);
     return () => clearInterval(t);
-  }, [hasCooldown, fetchConfig]);
+  }, [fetchConfig]);
 
   const post = useCallback(
     async (payload: Record<string, unknown>): Promise<AppConfigView | null> => {
@@ -362,6 +430,24 @@ export default function Home() {
     }, 600);
   };
 
+  const cooldownDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const updateGroupCooldown = (groupId: string, hoursStr: string) => {
+    if (!config) return;
+    
+    const hours = hoursStr === '' ? undefined : parseFloat(hoursStr);
+    
+    const groups = config.groups.map((g) => (g.id === groupId ? { ...g, rateLimitCooldownHours: hours } : g));
+    setConfig({ ...config, groups });
+    
+    if (cooldownDebounce.current) clearTimeout(cooldownDebounce.current);
+    cooldownDebounce.current = setTimeout(() => {
+      saveGroups(groups).catch(
+        (err) => pushToast(err instanceof Error ? err.message : 'Error', 'error'),
+      );
+    }, 600);
+  };
+
   const addKey = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!config || !activeGroup) return;
@@ -379,6 +465,8 @@ export default function Home() {
       key: value,
       status: 'active',
       cooldownUntil: null,
+      inFlight: 0,
+      groupName: activeGroup.name,
     };
     const groups = config.groups.map((g) =>
       g.id === activeGroup.id ? { ...g, keys: [...g.keys, newKey] } : g,
@@ -398,14 +486,25 @@ export default function Home() {
     !newKeyValue.trim().startsWith('sk-') &&
     !newKeyValue.trim().startsWith('fe_');
 
+  // Bug #14 fix: add confirmation dialog before deleting a key.
   const deleteKey = (key: KeyView) => {
     if (!config || !activeGroup) return;
-    const groups = config.groups.map((g) =>
-      g.id === activeGroup.id ? { ...g, keys: g.keys.filter((k) => k.id !== key.id) } : g,
-    );
-    saveGroups(groups).catch((err) =>
-      pushToast(err instanceof Error ? err.message : 'Error', 'error'),
-    );
+    setConfirm({
+      title: 'Delete key',
+      message: `Delete the key "${key.email}"? This cannot be undone.`,
+      confirmLabel: 'Delete key',
+      onConfirm: async () => {
+        const groups = config.groups.map((g) =>
+          g.id === activeGroup.id ? { ...g, keys: g.keys.filter((k) => k.id !== key.id) } : g,
+        );
+        try {
+          await saveGroups(groups);
+          pushToast('Key deleted');
+        } catch (err) {
+          pushToast(err instanceof Error ? err.message : 'Error', 'error');
+        }
+      },
+    });
   };
 
   const toggleConnection = async () => {
@@ -463,6 +562,13 @@ export default function Home() {
   }
 
   const connected = !!config?.isConnected;
+  const poolStats: PoolStats = config?.poolStats ?? {
+    totalKeys: 0,
+    activeKeys: 0,
+    rateLimitedKeys: 0,
+    invalidKeys: 0,
+    totalInFlight: 0,
+  };
 
   return (
     <div className="min-h-screen">
@@ -510,230 +616,275 @@ export default function Home() {
         </div>
       </header>
 
-      <main className="max-w-[1120px] mx-auto px-6 py-12 grid grid-cols-1 lg:grid-cols-[300px_1fr] gap-8 items-start">
-        {/* Groups rail */}
-        <aside className="flex flex-col gap-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-[14px] font-medium text-ink">
-              Groups
-              <span className="text-muted font-normal"> · {config?.groups.length ?? 0}</span>
-            </h2>
-            <button
-              onClick={() => setShowNewGroup((v) => !v)}
-              className="w-8 h-8 rounded-full border border-hairline flex items-center justify-center text-ink hover:border-border-strong transition-colors cursor-pointer"
-              aria-label="New group"
-            >
-              <Plus className="w-4 h-4" />
-            </button>
-          </div>
+      <main className="max-w-[1120px] mx-auto px-6 py-12 flex flex-col gap-8">
+        {/* Pool stats banner */}
+        <PoolStatsBanner stats={poolStats} />
 
-          {showNewGroup && (
-            <form
-              onSubmit={createGroup}
-              className="flex flex-col gap-3 p-4 rounded-[10px] border border-hairline bg-surface-soft"
-            >
-              <TextInput
-                placeholder="Group name"
-                value={newGroupName}
-                onChange={(e) => setNewGroupName(e.target.value)}
-                required
-                {...noAutofill}
-              />
-              <TextInput
-                placeholder="Upstream URL (e.g. https://api.anthropic.com)"
-                value={newGroupUrl}
-                onChange={(e) => setNewGroupUrl(e.target.value)}
-                mono
-                required
-                {...noAutofill}
-              />
-              <div className="flex gap-2">
-                <Button
-                  type="submit"
-                  variant="primary"
-                  className="flex-1"
-                  disabled={!newGroupName.trim() || !newGroupUrl.trim()}
-                >
-                  Create
-                </Button>
-                <Button type="button" variant="secondary" onClick={() => setShowNewGroup(false)}>
-                  Cancel
-                </Button>
-              </div>
-            </form>
-          )}
-
-          {config && config.groups.length === 0 ? (
-            <div className="text-[14px] text-muted py-8 text-center border border-dashed border-hairline rounded-[10px]">
-              No groups yet.
+        <div className="grid grid-cols-1 lg:grid-cols-[300px_1fr] gap-8 items-start">
+          {/* Groups rail */}
+          <aside className="flex flex-col gap-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-[14px] font-medium text-ink">
+                Groups
+                <span className="text-muted font-normal"> · {config?.groups.length ?? 0}</span>
+              </h2>
+              <button
+                onClick={() => setShowNewGroup((v) => !v)}
+                className="w-8 h-8 rounded-full border border-hairline flex items-center justify-center text-ink hover:border-border-strong transition-colors cursor-pointer"
+                aria-label="New group"
+              >
+                <Plus className="w-4 h-4" />
+              </button>
             </div>
-          ) : (
-            <div className="flex flex-col gap-2">
-              {config?.groups.map((group) => {
-                const isActive = config.activeGroupId === group.id;
-                return (
-                  <div
-                    key={group.id}
-                    onClick={() => selectGroup(group.id)}
-                    className={`group px-4 py-3 rounded-[10px] border cursor-pointer transition-colors ${
-                      isActive
-                        ? 'border-ink bg-surface-soft'
-                        : 'border-hairline hover:border-border-strong'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <Circle
-                          className={`w-2 h-2 shrink-0 ${
-                            isActive
-                              ? 'fill-ink text-ink'
-                              : 'fill-transparent text-border-strong'
-                          }`}
-                        />
-                        <span className="text-[14px] font-medium text-ink truncate">
-                          {group.name}
-                        </span>
-                      </div>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          deleteGroup(group);
-                        }}
-                        className="opacity-0 group-hover:opacity-100 text-muted hover:text-[color:var(--color-status-invalid)] transition cursor-pointer"
-                        aria-label="Delete group"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                    <span className="text-[13px] text-muted ml-4">
-                      {group.keys.length} key{group.keys.length === 1 ? '' : 's'}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </aside>
 
-        {/* Active group panel */}
-        <section className="flex flex-col gap-8">
-          {activeGroup ? (
-            <>
-              <div className="flex flex-col gap-3">
-                <div className="flex items-baseline justify-between gap-4">
-                  <h1 className="text-[32px] leading-tight font-normal text-ink tracking-tight">
-                    {activeGroup.name}
-                  </h1>
-                  <span className="text-[14px] text-muted shrink-0">
-                    {activeGroup.keys.length} key{activeGroup.keys.length === 1 ? '' : 's'}
-                  </span>
-                </div>
-                <label className="text-[13px] font-medium text-muted">Upstream URL</label>
+            {showNewGroup && (
+              <form
+                onSubmit={createGroup}
+                className="flex flex-col gap-3 p-4 rounded-[10px] border border-hairline bg-surface-soft"
+              >
                 <TextInput
-                  value={activeGroup.targetUrl}
-                  onChange={(e) => updateGroupUrl(activeGroup.id, e.target.value)}
-                  placeholder="https://api.anthropic.com"
-                  mono
+                  placeholder="Group name"
+                  value={newGroupName}
+                  onChange={(e) => setNewGroupName(e.target.value)}
+                  required
                   {...noAutofill}
                 />
-              </div>
-
-              {/* Add a key */}
-              <form onSubmit={addKey} className="flex flex-col gap-3">
-                <h2 className="text-[18px] font-medium text-ink">Add a key</h2>
-                <div className="flex flex-col sm:flex-row gap-3">
-                  <div className="sm:w-1/3">
-                    <TextInput
-                      placeholder="Email / label (optional)"
-                      value={newKeyEmail}
-                      onChange={(e) => setNewKeyEmail(e.target.value)}
-                      {...noAutofill}
-                    />
-                  </div>
-                  <div className="flex-1">
-                    <TextInput
-                      placeholder="API key (sk-… or fe_…)"
-                      value={newKeyValue}
-                      onChange={(e) => setNewKeyValue(e.target.value)}
-                      mono
-                      required
-                      {...secretAutofill}
-                    />
-                  </div>
-                  <Button type="submit" variant="primary" disabled={!newKeyValue.trim()}>
-                    <Plus className="w-4 h-4" />
-                    Add key
+                <TextInput
+                  placeholder="Upstream URL (e.g. https://api.anthropic.com)"
+                  value={newGroupUrl}
+                  onChange={(e) => setNewGroupUrl(e.target.value)}
+                  mono
+                  required
+                  {...noAutofill}
+                />
+                <div className="flex gap-2">
+                  <Button
+                    type="submit"
+                    variant="primary"
+                    className="flex-1"
+                    disabled={!newGroupName.trim() || !newGroupUrl.trim()}
+                  >
+                    Create
+                  </Button>
+                  <Button type="button" variant="secondary" onClick={() => setShowNewGroup(false)}>
+                    Cancel
                   </Button>
                 </div>
-                {keyPrefixWarning && (
-                  <div className="text-[13px] text-[color:var(--color-status-limited)] flex items-start gap-2">
-                    <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                    <span>Unusual key prefix (expected sk- or fe_), but it will still be added.</span>
-                  </div>
-                )}
               </form>
+            )}
 
-              {/* Key list */}
-              <div className="flex flex-col">
-                {activeGroup.keys.length === 0 ? (
-                  <div className="text-[14px] text-muted py-10 text-center border border-dashed border-hairline rounded-[10px]">
-                    No keys in this group yet. Add one above to get started.
-                  </div>
-                ) : (
-                  <div className="border border-hairline rounded-[10px] overflow-hidden">
-                    {activeGroup.keys.map((key, i) => (
-                      <div
-                        key={key.id}
-                        className={`group flex items-center gap-4 px-4 py-3.5 ${
-                          i > 0 ? 'border-t border-hairline' : ''
-                        }`}
-                      >
-                        <div className="flex-1 min-w-0">
-                          <div className="text-[14px] text-ink truncate">{key.email}</div>
-                          <div className="text-[13px] font-mono text-muted truncate">
-                            {maskKey(key.key)}
-                          </div>
+            <div className="text-[12px] text-muted px-1">
+              All keys from all groups are pooled for routing. Groups organize keys for management.
+            </div>
+
+            {config && config.groups.length === 0 ? (
+              <div className="text-[14px] text-muted py-8 text-center border border-dashed border-hairline rounded-[10px]">
+                No groups yet.
+              </div>
+            ) : (
+              <div className="flex flex-col gap-2">
+                {config?.groups.map((group) => {
+                  const isActive = config.activeGroupId === group.id;
+                  const groupActiveKeys = group.keys.filter(k => k.status === 'active').length;
+                  const groupLimitedKeys = group.keys.filter(k => k.status === 'rate-limited').length;
+                  const groupInvalidKeys = group.keys.filter(k => k.status === 'invalid').length;
+                  return (
+                    <div
+                      key={group.id}
+                      onClick={() => selectGroup(group.id)}
+                      className={`group px-4 py-3 rounded-[10px] border cursor-pointer transition-colors ${
+                        isActive
+                          ? 'border-ink bg-surface-soft'
+                          : 'border-hairline hover:border-border-strong'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <Circle
+                            className={`w-2 h-2 shrink-0 ${
+                              isActive
+                                ? 'fill-ink text-ink'
+                                : 'fill-transparent text-border-strong'
+                            }`}
+                          />
+                          <span className="text-[14px] font-medium text-ink truncate">
+                            {group.name}
+                          </span>
                         </div>
-                        <StatusChip status={key.status} cooldownUntil={key.cooldownUntil} />
                         <button
-                          onClick={() => deleteKey(key)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deleteGroup(group);
+                          }}
                           className="opacity-0 group-hover:opacity-100 text-muted hover:text-[color:var(--color-status-invalid)] transition cursor-pointer"
-                          aria-label="Delete key"
+                          aria-label="Delete group"
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>
                       </div>
-                    ))}
-                  </div>
-                )}
+                      <div className="flex items-center gap-2 ml-4 mt-0.5">
+                        <span className="text-[12px] text-muted">
+                          {group.keys.length} key{group.keys.length === 1 ? '' : 's'}
+                        </span>
+                        {groupActiveKeys > 0 && (
+                          <span className="text-[11px] text-[color:var(--color-status-ready)]">
+                            {groupActiveKeys} active
+                          </span>
+                        )}
+                        {groupLimitedKeys > 0 && (
+                          <span className="text-[11px] text-[color:var(--color-status-limited)]">
+                            {groupLimitedKeys} limited
+                          </span>
+                        )}
+                        {groupInvalidKeys > 0 && (
+                          <span className="text-[11px] text-[color:var(--color-status-invalid)]">
+                            {groupInvalidKeys} invalid
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
-            </>
-          ) : (
-            <div className="py-16 text-center border border-dashed border-hairline rounded-[12px]">
-              <p className="text-[16px] text-ink">No group selected</p>
-              <p className="text-[14px] text-muted mt-1">
-                Select a group on the left, or create one to begin.
+            )}
+          </aside>
+
+          {/* Active group panel */}
+          <section className="flex flex-col gap-8">
+            {activeGroup ? (
+              <>
+                <div className="flex flex-col gap-3">
+                  <div className="flex items-baseline justify-between gap-4">
+                    <h1 className="text-[32px] leading-tight font-normal text-ink tracking-tight">
+                      {activeGroup.name}
+                    </h1>
+                    <span className="text-[14px] text-muted shrink-0">
+                      {activeGroup.keys.length} key{activeGroup.keys.length === 1 ? '' : 's'}
+                    </span>
+                  </div>
+                  <label className="text-[13px] font-medium text-muted">Upstream URL</label>
+                  <TextInput
+                    value={activeGroup.targetUrl}
+                    onChange={(e) => updateGroupUrl(activeGroup.id, e.target.value)}
+                    placeholder="https://api.anthropic.com"
+                    mono
+                    {...noAutofill}
+                  />
+                  
+                  <label className="text-[13px] font-medium text-muted mt-2">Rate Limit Cooldown (Hours)</label>
+                  <TextInput
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    value={activeGroup.rateLimitCooldownHours ?? ''}
+                    onChange={(e) => updateGroupCooldown(activeGroup.id, e.target.value)}
+                    placeholder="Leave empty for default (uses API headers)"
+                    mono
+                    {...noAutofill}
+                  />
+                </div>
+
+                {/* Add a key */}
+                <form onSubmit={addKey} className="flex flex-col gap-3">
+                  <h2 className="text-[18px] font-medium text-ink">Add a key</h2>
+                  <div className="flex flex-col sm:flex-row gap-3">
+                    <div className="sm:w-1/3">
+                      <TextInput
+                        placeholder="Email / label (optional)"
+                        value={newKeyEmail}
+                        onChange={(e) => setNewKeyEmail(e.target.value)}
+                        {...noAutofill}
+                      />
+                    </div>
+                    <div className="flex-1">
+                      <TextInput
+                        placeholder="API key (sk-… or fe_…)"
+                        value={newKeyValue}
+                        onChange={(e) => setNewKeyValue(e.target.value)}
+                        mono
+                        required
+                        {...secretAutofill}
+                      />
+                    </div>
+                    <Button type="submit" variant="primary" disabled={!newKeyValue.trim()}>
+                      <Plus className="w-4 h-4" />
+                      Add key
+                    </Button>
+                  </div>
+                  {keyPrefixWarning && (
+                    <div className="text-[13px] text-[color:var(--color-status-limited)] flex items-start gap-2">
+                      <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                      <span>Unusual key prefix (expected sk- or fe_), but it will still be added.</span>
+                    </div>
+                  )}
+                </form>
+
+                {/* Key list */}
+                <div className="flex flex-col">
+                  {activeGroup.keys.length === 0 ? (
+                    <div className="text-[14px] text-muted py-10 text-center border border-dashed border-hairline rounded-[10px]">
+                      No keys in this group yet. Add one above to get started.
+                    </div>
+                  ) : (
+                    <div className="border border-hairline rounded-[10px] overflow-hidden">
+                      {activeGroup.keys.map((key, i) => (
+                        <div
+                          key={key.id}
+                          className={`group flex items-center gap-4 px-4 py-3.5 ${
+                            i > 0 ? 'border-t border-hairline' : ''
+                          }`}
+                        >
+                          <div className="flex-1 min-w-0">
+                            <div className="text-[14px] text-ink truncate">{key.email}</div>
+                            <div className="text-[13px] font-mono text-muted truncate">
+                              {maskKey(key.key)}
+                            </div>
+                          </div>
+                          <StatusChip status={key.status} cooldownUntil={key.cooldownUntil} inFlight={key.inFlight} />
+                          <button
+                            onClick={() => deleteKey(key)}
+                            className="opacity-0 group-hover:opacity-100 text-muted hover:text-[color:var(--color-status-invalid)] transition cursor-pointer"
+                            aria-label="Delete key"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <div className="py-16 text-center border border-dashed border-hairline rounded-[12px]">
+                <p className="text-[16px] text-ink">No group selected</p>
+                <p className="text-[14px] text-muted mt-1">
+                  Select a group on the left, or create one to begin.
+                </p>
+              </div>
+            )}
+
+            {/* Guide card */}
+            <div className="rounded-[10px] bg-surface-soft border border-hairline p-6 flex flex-col gap-2">
+              <h3 className="text-[16px] font-medium text-ink">Connecting Claude Code</h3>
+              <p className="text-[14px] text-body">
+                <span className="text-ink font-medium">Connect</span> syncs your Claude CLI
+                settings.json automatically to route through this proxy. Click{' '}
+                <span className="text-ink font-medium">Disconnect</span> to restore it.
+              </p>
+              <p className="text-[14px] text-body">
+                To point tools manually, set{' '}
+                <code className="font-mono text-[13px] bg-canvas border border-hairline rounded-[6px] px-1.5 py-0.5">
+                  ANTHROPIC_BASE_URL=http://localhost:9999
+                </code>
+                .
+              </p>
+              <p className="text-[14px] text-body mt-1">
+                <span className="text-ink font-medium">Routing:</span> All keys from all groups are pooled
+                and load-balanced via true round-robin. Each key uses its group&apos;s upstream URL and cooldown settings.
               </p>
             </div>
-          )}
-
-          {/* Guide card */}
-          <div className="rounded-[10px] bg-surface-soft border border-hairline p-6 flex flex-col gap-2">
-            <h3 className="text-[16px] font-medium text-ink">Connecting Claude Code</h3>
-            <p className="text-[14px] text-body">
-              <span className="text-ink font-medium">Connect</span> syncs your Claude CLI
-              settings.json automatically to route through this proxy. Click{' '}
-              <span className="text-ink font-medium">Disconnect</span> to restore it.
-            </p>
-            <p className="text-[14px] text-body">
-              To point tools manually, set{' '}
-              <code className="font-mono text-[13px] bg-canvas border border-hairline rounded-[6px] px-1.5 py-0.5">
-                ANTHROPIC_BASE_URL=http://localhost:9999
-              </code>
-              .
-            </p>
-          </div>
-        </section>
+          </section>
+        </div>
       </main>
 
       <ConfirmDialog state={confirm} onClose={() => setConfirm(null)} />

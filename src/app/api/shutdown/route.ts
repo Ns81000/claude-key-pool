@@ -22,9 +22,10 @@ export async function POST() {
     console.error('Failed to restore settings.json on shutdown:', error);
   }
 
+  // Bug #6 fix: increased from 300ms to 1000ms for more reliable response flushing.
   // Respond before exiting so the browser gets a clean acknowledgement.
   setTimeout(() => {
     process.exit(0);
-  }, 300);
+  }, 1000);
   return NextResponse.json({ ok: true, message: 'Server shutting down' });
 }

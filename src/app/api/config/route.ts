@@ -14,10 +14,11 @@ export const dynamic = 'force-dynamic';
 // Strip any runtime-only fields the client may echo back, keeping persisted shape.
 function sanitizeGroups(groups: unknown): GroupConfig[] {
   if (!Array.isArray(groups)) return [];
-  return groups.map((g) => ({
+  return groups.map((g: any) => ({
     id: String(g.id),
     name: String(g.name ?? 'Untitled'),
     targetUrl: String(g.targetUrl ?? ''),
+    rateLimitCooldownHours: typeof g.rateLimitCooldownHours === 'number' ? g.rateLimitCooldownHours : undefined,
     keys: Array.isArray(g.keys)
       ? g.keys.map((k: Record<string, unknown>) => ({
           id: String(k.id),
@@ -57,6 +58,8 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === 'setActiveGroup') {
+      // Kept for dashboard display purposes — controls which group is shown
+      // expanded in the UI. No longer affects proxy routing (flat pool).
       current = { ...current, activeGroupId: activeGroupId ?? null };
       await saveConfig(current);
       return NextResponse.json(buildConfigView(current));

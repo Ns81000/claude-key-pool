@@ -16,6 +16,7 @@ export interface GroupConfig {
   name: string;
   targetUrl: string;
   keys: KeyConfig[];
+  rateLimitCooldownHours?: number;
 }
 
 export interface AppConfig {
@@ -29,6 +30,8 @@ export interface AppConfig {
 export interface KeyView extends KeyConfig {
   status: KeyStatus;
   cooldownUntil: string | null;
+  inFlight: number;
+  groupName: string;
 }
 
 export interface GroupView extends Omit<GroupConfig, 'keys'> {
@@ -37,6 +40,15 @@ export interface GroupView extends Omit<GroupConfig, 'keys'> {
 
 export interface AppConfigView extends Omit<AppConfig, 'groups'> {
   groups: GroupView[];
+  poolStats: PoolStats;
+}
+
+export interface PoolStats {
+  totalKeys: number;
+  activeKeys: number;
+  rateLimitedKeys: number;
+  invalidKeys: number;
+  totalInFlight: number;
 }
 
 const CONFIG_FILE_PATH = path.join(process.cwd(), 'config.json');
@@ -58,11 +70,12 @@ export interface RuntimeKeyState {
   status: KeyStatus;
   cooldownUntil: number | null; // ms epoch, only meaningful when rate-limited
   lastTimeoutTime?: number;
+  inFlight: number; // number of in-flight requests currently using this key
 }
 
 interface GlobalProxyState {
   keys: Record<string, RuntimeKeyState>; // keyId -> state
-  rrCursor: number; // round-robin cursor
+  roundRobinIndex: number; // flat-pool round-robin pointer
   // Cached parsed config + invalidation metadata
   configCache: AppConfig | null;
   configMtimeMs: number;
@@ -75,7 +88,7 @@ const globalForProxy = global as unknown as { proxyState?: GlobalProxyState };
 if (!globalForProxy.proxyState) {
   globalForProxy.proxyState = {
     keys: {},
-    rrCursor: 0,
+    roundRobinIndex: -1,
     configCache: null,
     configMtimeMs: 0,
     configVersion: 0,
@@ -93,11 +106,12 @@ function readConfigFromDisk(): AppConfig {
         groups?: Array<Partial<GroupConfig> & { keys?: Array<Record<string, unknown>> }>;
       };
       // Migrate: strip any stats fields that may exist in an older config.json.
-      const groups: GroupConfig[] = (parsed.groups || []).map((g) => ({
+      const groups: GroupConfig[] = (parsed.groups || []).map((g: any) => ({
         id: String(g.id),
         name: String(g.name ?? 'Untitled'),
         targetUrl: String(g.targetUrl ?? ''),
-        keys: (g.keys || []).map((k) => ({
+        rateLimitCooldownHours: typeof g.rateLimitCooldownHours === 'number' ? g.rateLimitCooldownHours : undefined,
+        keys: (g.keys || []).map((k: any) => ({
           id: String(k.id),
           email: String(k.email ?? ''),
           key: String(k.key ?? ''),
@@ -119,6 +133,16 @@ function readConfigFromDisk(): AppConfig {
 // Fast config read: re-parse only when the file mtime changed or a dashboard
 // write bumped the in-memory version. The hot request path calls this.
 export function loadConfig(): AppConfig {
+  // Fast path: if configVersion matches cachedVersion and we have a cache,
+  // skip the filesystem stat entirely (Bug #8 optimization).
+  if (
+    proxyState.configCache &&
+    proxyState.cachedVersion === proxyState.configVersion &&
+    proxyState.configMtimeMs > 0
+  ) {
+    return proxyState.configCache;
+  }
+
   let mtimeMs = 0;
   try {
     mtimeMs = fs.statSync(CONFIG_FILE_PATH).mtimeMs;
@@ -144,7 +168,7 @@ export function loadConfig(): AppConfig {
 export function getKeyState(keyId: string): RuntimeKeyState {
   let st = proxyState.keys[keyId];
   if (!st) {
-    st = { status: 'active', cooldownUntil: null };
+    st = { status: 'active', cooldownUntil: null, inFlight: 0 };
     proxyState.keys[keyId] = st;
   }
   // Auto-recover from cooldown.
@@ -167,27 +191,61 @@ export function markInvalid(keyId: string): void {
   st.cooldownUntil = null;
 }
 
+export function markProviderError(keyId: string): void {
+  const st = getKeyState(keyId);
+  st.status = 'rate-limited';
+  st.cooldownUntil = Date.now() + 5 * 60 * 1000; // 5 minute cooldown
+}
+
 export function markKeySlow(keyId: string): void {
   const st = getKeyState(keyId);
   st.lastTimeoutTime = Date.now();
 }
 
-export function keyStatusView(keyId: string): { status: KeyStatus; cooldownUntil: string | null } {
+export function incrementInFlight(keyId: string): void {
+  const st = getKeyState(keyId);
+  st.inFlight++;
+}
+
+export function decrementInFlight(keyId: string): void {
+  const st = getKeyState(keyId);
+  if (st.inFlight > 0) st.inFlight--;
+}
+
+export function keyStatusView(keyId: string): { status: KeyStatus; cooldownUntil: string | null; inFlight: number } {
   const st = getKeyState(keyId);
   return {
     status: st.status,
     cooldownUntil: st.cooldownUntil ? new Date(st.cooldownUntil).toISOString() : null,
+    inFlight: st.inFlight,
   };
 }
 
 // Build the dashboard-facing view, merging live runtime status into the keys.
 export function buildConfigView(config: AppConfig): AppConfigView {
+  let totalKeys = 0;
+  let activeKeys = 0;
+  let rateLimitedKeys = 0;
+  let invalidKeys = 0;
+  let totalInFlight = 0;
+
+  const groups = config.groups.map((g) => ({
+    ...g,
+    keys: g.keys.map((k) => {
+      const view = keyStatusView(k.id);
+      totalKeys++;
+      if (view.status === 'active') activeKeys++;
+      else if (view.status === 'rate-limited') rateLimitedKeys++;
+      else if (view.status === 'invalid') invalidKeys++;
+      totalInFlight += view.inFlight;
+      return { ...k, ...view, groupName: g.name };
+    }),
+  }));
+
   return {
     ...config,
-    groups: config.groups.map((g) => ({
-      ...g,
-      keys: g.keys.map((k) => ({ ...k, ...keyStatusView(k.id) })),
-    })),
+    groups,
+    poolStats: { totalKeys, activeKeys, rateLimitedKeys, invalidKeys, totalInFlight },
   };
 }
 
@@ -277,10 +335,11 @@ export function disconnectFromClaude(config: AppConfig): AppConfig {
     fs.writeFileSync(tmp, config.backupSettings, 'utf-8');
     fs.renameSync(tmp, CLAUDE_SETTINGS_PATH);
   } else {
+    // Bug #7 fix: fallback to official Anthropic API, not a third-party domain.
     const content = fs.readFileSync(CLAUDE_SETTINGS_PATH, 'utf-8');
     const settingsJson = JSON.parse(content) as { env?: Record<string, string> };
     if (settingsJson.env) {
-      settingsJson.env.ANTHROPIC_BASE_URL = 'https://cc.freemodel.dev';
+      settingsJson.env.ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
     }
     fs.writeFileSync(tmp, JSON.stringify(settingsJson, null, 2), 'utf-8');
     fs.renameSync(tmp, CLAUDE_SETTINGS_PATH);

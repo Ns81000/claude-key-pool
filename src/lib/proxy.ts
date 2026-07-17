@@ -1,4 +1,5 @@
 import {
+  AppConfig,
   GroupConfig,
   KeyConfig,
   getKeyState,
@@ -115,8 +116,12 @@ export function classifyInvalidPayload(payload: unknown): boolean {
 
 // Compute cooldown end (ms epoch) from response headers, honoring retry-after
 // and anthropic ratelimit reset headers, falling back to a sane default.
-export function computeCooldownUntil(headers: Headers): number {
+export function computeCooldownUntil(headers: Headers, group?: GroupConfig): number {
   const now = Date.now();
+
+  if (group && typeof group.rateLimitCooldownHours === 'number' && group.rateLimitCooldownHours > 0) {
+    return now + group.rateLimitCooldownHours * 3600 * 1000;
+  }
 
   const retryAfter = headers.get('retry-after');
   if (retryAfter) {
@@ -142,33 +147,97 @@ export function computeCooldownUntil(headers: Headers): number {
   return now + DEFAULT_COOLDOWN_MS;
 }
 
-// Round-robin over currently-active keys. Uses runtime state only.
-export function selectActiveKeys(group: GroupConfig): KeyConfig[] {
-  const active = group.keys.filter((k) => getKeyState(k.id).status === 'active');
-  if (active.length === 0) return [];
+// ---------------------------------------------------------------------------
+// Flat-pool entry: a key paired with its parent group for routing context.
+// ---------------------------------------------------------------------------
+export interface FlatPoolEntry {
+  group: GroupConfig;
+  key: KeyConfig;
+}
 
+// Build a flat array of all keys across all groups, preserving group context.
+export function buildFlatPool(config: AppConfig): FlatPoolEntry[] {
+  const pool: FlatPoolEntry[] = [];
+  for (const group of config.groups) {
+    for (const key of group.keys) {
+      pool.push({ group, key });
+    }
+  }
+  return pool;
+}
+
+// True round-robin selection across the entire flat pool.
+// - Always advances the pointer so every call gets a different key.
+// - Prefers keys with zero inFlight (concurrency-aware, Bug #3 fix).
+// - Deprioritizes keys that recently timed out (slow-key awareness).
+// - Skips rate-limited and invalid keys.
+// Returns null when all keys are exhausted.
+export function getNextCandidate(config: AppConfig): { group: GroupConfig; key: KeyConfig } | null {
+  const pool = buildFlatPool(config);
+  if (pool.length === 0) return null;
+
+  const startIndex = (proxyState.roundRobinIndex + 1) % pool.length;
   const now = Date.now();
-  const fast: KeyConfig[] = [];
-  const slow: KeyConfig[] = [];
 
-  for (const k of active) {
-    const st = getKeyState(k.id);
-    const lastTimeout = st.lastTimeoutTime || 0;
-    // Keys that timed out in the last SLOW_KEY_WINDOW_MS are treated as slow
-    if (now - lastTimeout < SLOW_KEY_WINDOW_MS) {
-      slow.push(k);
-    } else {
-      fast.push(k);
+  // First pass: find the best idle (inFlight === 0), non-slow active key.
+  let bestIdleIndex = -1;
+  // Second pass fallback: any active key with lowest inFlight.
+  let bestBusyIndex = -1;
+  let bestBusyInFlight = Infinity;
+  // Third pass fallback: active but slow key.
+  let bestSlowIndex = -1;
+  let bestSlowInFlight = Infinity;
+
+  for (let i = 0; i < pool.length; i++) {
+    const idx = (startIndex + i) % pool.length;
+    const entry = pool[idx];
+    const state = getKeyState(entry.key.id);
+
+    if (state.status !== 'active') continue;
+
+    const isSlow =
+      state.lastTimeoutTime !== undefined &&
+      now - state.lastTimeoutTime < SLOW_KEY_WINDOW_MS;
+
+    if (isSlow) {
+      // Track best slow key as last-resort fallback.
+      if (state.inFlight < bestSlowInFlight) {
+        bestSlowIndex = idx;
+        bestSlowInFlight = state.inFlight;
+      }
+      continue;
+    }
+
+    if (state.inFlight === 0) {
+      // Best case: idle, non-slow key. Take it immediately.
+      bestIdleIndex = idx;
+      break;
+    }
+
+    // Track the busy-but-not-slow key with fewest in-flight requests.
+    if (state.inFlight < bestBusyInFlight) {
+      bestBusyIndex = idx;
+      bestBusyInFlight = state.inFlight;
     }
   }
 
-  // Prioritize fast keys; fall back to slow keys only if no fast keys exist
-  const candidates = fast.length > 0 ? fast : slow;
+  // Pick the best candidate in priority order.
+  const chosenIndex =
+    bestIdleIndex >= 0
+      ? bestIdleIndex
+      : bestBusyIndex >= 0
+        ? bestBusyIndex
+        : bestSlowIndex >= 0
+          ? bestSlowIndex
+          : -1;
 
-  if (candidates.length <= 1) return candidates;
-  const start = proxyState.rrCursor % candidates.length;
-  proxyState.rrCursor = (proxyState.rrCursor + 1) % candidates.length;
-  return [...candidates.slice(start), ...candidates.slice(0, start)];
+  if (chosenIndex < 0) return null;
+
+  // Advance the round-robin pointer so the next call starts after this key.
+  proxyState.roundRobinIndex = chosenIndex;
+
+  const chosen = pool[chosenIndex];
+  return { group: chosen.group, key: chosen.key };
 }
 
 // Build the upstream request headers: copy client headers minus hop-by-hop and
@@ -227,9 +296,8 @@ export interface StreamPeekResult {
 // Detect the SSE error events that mean "rotate": an `event: error` frame or a
 // data payload whose type/message classifies as a limit error, AS LONG AS no
 // content has been emitted yet. Returns the head chunks that were consumed.
-function detectLimitInSseText(text: string): boolean {
-  // SSE frames are separated by blank lines. Scan each data: line for a limit
-  // error before any message_start / content_block has appeared.
+// Bug #4 fix: use JSON-parsed type field instead of raw substring for content detection.
+function detectLimitInSseText(text: string): { limited: boolean; sawContent: boolean } {
   const lines = text.split(/\r?\n/);
   for (const line of lines) {
     const trimmed = line.trim();
@@ -245,15 +313,15 @@ function detectLimitInSseText(text: string): boolean {
         type === 'content_block_start' ||
         type === 'content_block_delta'
       ) {
-        return false;
+        return { limited: false, sawContent: true };
       }
-      if (type === 'error' && classifyErrorPayload(obj)) return true;
-      if (classifyErrorPayload(obj)) return true;
+      if (type === 'error' && classifyErrorPayload(obj)) return { limited: true, sawContent: false };
+      if (classifyErrorPayload(obj)) return { limited: true, sawContent: false };
     } catch {
       // Partial JSON at the buffer edge — ignore, we'll see it in the next chunk.
     }
   }
-  return false;
+  return { limited: false, sawContent: false };
 }
 
 // Wrap the upstream stream. Peek the head (bounded by bytes + time) for an early
@@ -293,14 +361,13 @@ export async function peekStreamForLimit(
       bufferedBytes += chunk.value.byteLength;
       headText += decoder.decode(chunk.value, { stream: true });
 
-      if (detectLimitInSseText(headText)) {
+      // Bug #4 fix: use JSON-parsed detection instead of raw substring search.
+      const result = detectLimitInSseText(headText);
+      if (result.limited) {
         limited = true;
         break;
       }
-      if (
-        headText.includes('message_start') ||
-        headText.includes('content_block')
-      ) {
+      if (result.sawContent) {
         sawContent = true;
         break;
       }
@@ -317,36 +384,71 @@ export async function peekStreamForLimit(
     return { limited: true, stream: null };
   }
 
-  // Replay buffered head, then pipe the remainder of the upstream stream.
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
+  // Replay buffered head, then pipe the remainder with stall timeout (Bug #11 fix).
+  const stream = createStallProtectedStream(reader, headChunks);
+
+  return { limited: false, stream };
+}
+
+// Create a ReadableStream that replays buffered head chunks, then pipes the
+// remainder from the reader. Implements stall timeout (Bug #11): if no chunk
+// arrives within STALL_TIMEOUT_MS, the stream is aborted.
+export function createStallProtectedStream(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  headChunks: Uint8Array[] = [],
+): ReadableStream<Uint8Array> {
+  let stallTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function resetStallTimer(controller: ReadableStreamDefaultController<Uint8Array>) {
+    if (stallTimer) clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => {
+      try {
+        controller.error(new Error(`Upstream stalled: no data received for ${STALL_TIMEOUT_MS / 1000}s`));
+        reader.cancel('stall timeout').catch(() => {});
+      } catch {
+        /* controller may already be closed */
+      }
+    }, STALL_TIMEOUT_MS);
+  }
+
+  function clearStall() {
+    if (stallTimer) {
+      clearTimeout(stallTimer);
+      stallTimer = null;
+    }
+  }
+
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
       for (const c of headChunks) controller.enqueue(c);
+      // Start the stall timer for the remainder of the stream.
+      resetStallTimer(controller);
     },
     async pull(controller) {
       try {
         const { done, value } = await reader.read();
         if (done) {
+          clearStall();
           controller.close();
           return;
         }
-        if (value) controller.enqueue(value);
+        if (value) {
+          resetStallTimer(controller);
+          controller.enqueue(value);
+        }
       } catch (err) {
+        clearStall();
         controller.error(err);
       }
     },
-    async cancel(reason) {
-      try {
-        await reader.cancel(reason);
-      } catch {
-        /* ignore */
-      }
+    cancel(reason) {
+      clearStall();
+      reader.cancel(reason).catch(() => {});
     },
   });
-
-  return { limited: false, stream };
 }
 
 // Mark a key limited from response headers (429 or classified error body).
-export function limitKeyFromHeaders(keyId: string, headers: Headers): void {
-  markLimited(keyId, computeCooldownUntil(headers));
+export function limitKeyFromHeaders(keyId: string, headers: Headers, group?: GroupConfig): void {
+  markLimited(keyId, computeCooldownUntil(headers, group));
 }

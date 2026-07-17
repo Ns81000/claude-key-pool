@@ -1,6 +1,14 @@
 @echo off
 title Claude Key Pool
 cd /d "%~dp0"
+
+rem Enable ANSI escape code support for colored terminal output (Windows 10+).
+rem This registry key enables VirtualTerminalLevel for the current console.
+reg query "HKCU\Console" /v VirtualTerminalLevel >nul 2>nul
+if errorlevel 1 (
+  reg add "HKCU\Console" /v VirtualTerminalLevel /t REG_DWORD /d 1 /f >nul 2>nul
+)
+
 echo.
 echo   Claude Key Pool
 echo   Starting server on http://localhost:9999
@@ -31,6 +39,10 @@ rem as soon as it is done. IMPORTANT: this command must contain no pipes -
 rem inside double quotes cmd passes ^| through as a literal caret, which breaks
 rem PowerShell's argument parsing (the bug that stopped the browser opening).
 start "" /min powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "for($i=0;$i -lt 120;$i++){ try{ $null = Invoke-WebRequest -UseBasicParsing 'http://localhost:9999' -TimeoutSec 2; break }catch{ Start-Sleep -Milliseconds 500 } }; Start-Process 'http://localhost:9999'"
+
+rem Set FORCE_COLOR so the Node.js runtime emits ANSI codes even when stdout
+rem is not detected as a TTY (common in CMD windows).
+set FORCE_COLOR=1
 
 rem Run the production server in the FOREGROUND of this window. Closing this
 rem window stops the proxy, exactly as the message above promises.
