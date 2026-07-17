@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Claude Key Pool — Local proxy & automatic API key rotation</title>
-<meta name="description" content="A fast, local proxy that pools your Anthropic-compatible API keys and rotates to the next one the moment a key hits a rate or usage limit — including mid-stream." />
+<meta name="description" content="A fast, local proxy that pools your Anthropic-compatible API keys into a single flat pool with true round-robin load balancing. Rotates instantly on rate limits — including mid-stream." />
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23181d26'/%3E%3Cpath d='M27 20a11 11 0 1 0 8.9 17.5L42 43.6l3.2-3.2-2.3-2.3 2.6-2.6-2.3-2.3-2.6 2.6-2.8-2.8A11 11 0 0 0 27 20Zm0 6a5 5 0 1 1 0 10 5 5 0 0 1 0-10Z' fill='%23fff'/%3E%3Ccircle cx='45' cy='20' r='5' fill='%23fcab79'/%3E%3C/svg%3E" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -228,7 +228,7 @@
     <svg class="float-logo" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="64" height="64" rx="14" fill="#181d26"/><path d="M27 20a11 11 0 1 0 8.9 17.5L42 43.6l3.2-3.2-2.3-2.3 2.6-2.6-2.3-2.3-2.6 2.6-2.8-2.8A11 11 0 0 0 27 20Zm0 6a5 5 0 1 1 0 10 5 5 0 0 1 0-10Z" fill="#fff"/><circle cx="45" cy="20" r="5" fill="#fcab79"/></svg>
     <div class="badge rise"><span class="dot"></span> Runs locally on port 9999</div>
     <h1 class="rise r1">Never let one exhausted key <span class="accent">stop your session</span></h1>
-    <p class="sub rise r2">A fast, local proxy that pools your Anthropic-compatible API keys and rotates to the next one the moment a key hits a rate or usage limit — including mid-stream.</p>
+    <p class="sub rise r2">A fast, local proxy that flattens all your API keys into a single global pool with true round-robin. Every request gets a different key. Rotates instantly on rate limits — even mid-stream.</p>
     <div class="hero-cta rise r3">
       <a class="btn btn-primary" href="#install">Get started</a>
       <a class="btn btn-secondary" href="https://github.com/Ns81000/claude-key-pool" target="_blank" rel="noopener"><svg class="gh-ico" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.04-.02-2.05-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.34-5.47-5.95 0-1.31.47-2.39 1.24-3.23-.13-.3-.54-1.53.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.65.24 2.88.12 3.18.77.84 1.23 1.92 1.23 3.23 0 4.62-2.81 5.64-5.49 5.94.43.37.81 1.1.81 2.22 0 1.61-.01 2.9-.01 3.29 0 .32.21.7.82.58A12 12 0 0 0 24 12.5C24 5.87 18.63.5 12 .5Z"/></svg>View on GitHub</a>
@@ -238,6 +238,7 @@
       <div class="keychip limited"><span class="s"></span> key_01 · limited</div>
       <div class="keychip active"><span class="s"></span> key_02 · active →</div>
       <div class="keychip idle"><span class="s"></span> key_03 · idle</div>
+      <div class="keychip idle"><span class="s"></span> key_04 · idle</div>
     </div>
   </div>
 </section>
@@ -246,14 +247,14 @@
   <div class="wrap">
     <div class="section-head reveal">
       <div class="eyebrow">Why it exists</div>
-      <h2 class="title">Rotation that just works — even while streaming</h2>
-      <p class="lead">Built for the Claude Code CLI and any Anthropic-compatible SDK. Point it at your upstream, drop in your keys, and let it handle the limits.</p>
+      <h2 class="title">True round-robin — even while streaming</h2>
+      <p class="lead">Built for the Claude Code CLI and any Anthropic-compatible SDK. All keys from all groups are pooled and load-balanced. Every request gets a different key.</p>
     </div>
     <div class="grid">
       <div class="card reveal">
         <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></div>
-        <h3>Automatic rotation</h3>
-        <p>429s, rate-limit, overloaded, quota, credit and usage-limit errors all trigger a transparent switch to the next available key.</p>
+        <h3>True round-robin</h3>
+        <p>Every request gets a different key. All keys from all groups are flattened into a single global pool. No more burning through one key before touching the next.</p>
       </div>
       <div class="card reveal d1">
         <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></div>
@@ -262,23 +263,23 @@
       </div>
       <div class="card reveal d2">
         <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></div>
-        <h3>Honors retry-after</h3>
-        <p>Cooldowns respect the upstream's retry-after and ratelimit-reset headers. A limited key auto-recovers when its cooldown ends.</p>
+        <h3>Concurrency-aware</h3>
+        <p>Tracks in-flight requests per key and prefers idle keys. Multiple simultaneous requests are distributed across different keys, not piled onto one.</p>
       </div>
       <div class="card reveal">
         <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></div>
-        <h3>Fast & robust</h3>
-        <p>Reads config from an in-memory cache on the hot path, never writes to disk per request, and forwards bodies without needless re-serialization.</p>
+        <h3>Stall protection</h3>
+        <p>If an upstream stops sending data mid-stream, the proxy aborts after 120 seconds instead of hanging forever. Connect timeouts and slow keys are deprioritized.</p>
       </div>
       <div class="card reveal d1">
         <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></div>
-        <h3>Grouped keys</h3>
-        <p>Organize keys by upstream endpoint and switch the active pool with one click. Round-robin spreads load evenly across active keys.</p>
+        <h3>Multi-provider groups</h3>
+        <p>Organize keys by upstream endpoint — each group has its own URL and cooldown settings. All keys participate in the global pool regardless of group.</p>
       </div>
       <div class="card reveal d2">
         <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></div>
-        <h3>Minimal dashboard</h3>
-        <p>A calm, editorial UI. No token counters, no noise — just your groups, keys, and each key's live status: Ready, Rate-limited, or Invalid.</p>
+        <h3>Live terminal &amp; dashboard</h3>
+        <p>Color-coded real-time logs in the terminal with request IDs and timing. A pool stats dashboard shows total, active, rate-limited, invalid, and in-flight counts.</p>
       </div>
     </div>
   </div>
@@ -358,12 +359,14 @@
       <p class="lead">The proxy classifies each upstream response and decides whether to rotate, retry, or fail cleanly.</p>
     </div>
     <div class="rot reveal">
-      <div class="row"><div class="c k">429 Too Many Requests</div><div class="c v">Mark key rate-limited, honor retry-after, rotate</div></div>
+      <div class="row"><div class="c k">429 (key-level)</div><div class="c v">Mark key rate-limited, honor retry-after, rotate</div></div>
+      <div class="row"><div class="c k">429 (IP-level)</div><div class="c v">Rotate to next key without cooling down the current one</div></div>
       <div class="row"><div class="c k">401 / 403</div><div class="c v">Mark key invalid (won't auto-recover), rotate</div></div>
       <div class="row"><div class="c k">rate_limit / overloaded / quota</div><div class="c v">Mark limited, rotate to the next key</div></div>
       <div class="row"><div class="c k">SSE error before any content</div><div class="c v">Silently retry — client sees one clean stream</div></div>
       <div class="row"><div class="c k">SSE error after content started</div><div class="c v">Forward as-is, mark limited so the next request rotates</div></div>
-      <div class="row"><div class="c k">5xx / network / timeout</div><div class="c v">Transient — try next key; 502 only if all fail</div></div>
+      <div class="row"><div class="c k">5xx / network / timeout</div><div class="c v">Transient — try next key (marked slow); 502 only if all fail</div></div>
+      <div class="row"><div class="c k">Upstream stalls (120s silence)</div><div class="c v">Abort the connection and error to the client</div></div>
       <div class="row"><div class="c k">All keys exhausted</div><div class="c v">Return a clean 429 to the client</div></div>
     </div>
   </div>
