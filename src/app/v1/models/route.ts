@@ -96,12 +96,11 @@ export async function GET(req: NextRequest) {
 
       const isTimeout = err && (err as any).name === 'AbortError';
       if (isTimeout) {
-        markProviderError(key.id);
         markKeySlow(key.id);
         logRotation(reqId, key.email, `Models fetch timed out (${CONNECT_TIMEOUT_MS / 1000}s) → marked slow`);
       } else {
-        markProviderError(key.id);
-        logRotation(reqId, key.email, `Models fetch failed: ${err instanceof Error ? err.message : String(err)}`);
+        markKeySlow(key.id);
+        logRotation(reqId, key.email, `Models fetch failed: ${err instanceof Error ? err.message : String(err)} → marked slow`);
       }
       totalTransientFailures++;
       continue;

@@ -118,12 +118,11 @@ export async function POST(req: NextRequest) {
 
       const isTimeout = err && (err as any).name === 'AbortError';
       if (isTimeout) {
-        markProviderError(key.id);
         markKeySlow(key.id);
         logRotation(reqId, key.email, `Connection timed out (${CONNECT_TIMEOUT_MS / 1000}s) → marked slow`);
       } else {
-        markProviderError(key.id);
-        logRotation(reqId, key.email, `Fetch failed: ${err instanceof Error ? err.message : String(err)}`);
+        markKeySlow(key.id);
+        logRotation(reqId, key.email, `Fetch failed: ${err instanceof Error ? err.message : String(err)} → marked slow`);
       }
       totalTransientFailures++;
       continue;
