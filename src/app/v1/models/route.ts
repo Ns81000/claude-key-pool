@@ -5,6 +5,7 @@ import {
   buildResponseHeaders,
   buildUpstreamHeaders,
   classifyErrorPayload,
+  classifyInvalidPayload,
   computeCooldownUntil,
   limitKeyFromHeaders,
   selectActiveKeys,
@@ -85,8 +86,23 @@ export async function GET(req: NextRequest) {
       clearTimeout(timer);
 
       if (upstream.status === 429) {
-        limitKeyFromHeaders(key.id, upstream.headers);
-        console.warn(`Key ${key.email}: models fetch 429 rate limit. Rotating.`);
+        let payload: unknown = null;
+        try {
+          payload = await upstream.clone().json();
+        } catch {
+          /* ignore */
+        }
+
+        if (classifyInvalidPayload(payload)) {
+          markInvalid(key.id);
+          console.warn(`Key ${key.email}: models fetch 429 invalid/revoked error in body. Rotating.`);
+        } else if (classifyErrorPayload(payload)) {
+          limitKeyFromHeaders(key.id, upstream.headers);
+          console.warn(`Key ${key.email}: models fetch 429 rate limit. Rotating.`);
+        } else {
+          // IP-level / reseller rate limit. Rotate, but do not rate-limit this specific key.
+          console.warn(`Key ${key.email}: models fetch 429 rate limit (generic/IP-level). Rotating without cooling down key.`);
+        }
         continue;
       }
       if (upstream.status === 401 || upstream.status === 403) {
@@ -100,6 +116,11 @@ export async function GET(req: NextRequest) {
           payload = await upstream.clone().json();
         } catch {
           /* non-JSON */
+        }
+        if (classifyInvalidPayload(payload)) {
+          markInvalid(key.id);
+          console.warn(`Key ${key.email}: models fetch invalid/revoked error in body. Rotating.`);
+          continue;
         }
         if (classifyErrorPayload(payload)) {
           markLimited(key.id, computeCooldownUntil(upstream.headers));

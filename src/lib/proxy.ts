@@ -9,9 +9,9 @@ import {
 // Connect / first-byte timeout. There is intentionally no hard cap on total
 // stream duration (long completions are normal), but we abort if the upstream
 // produces no bytes for STALL_TIMEOUT_MS.
-export const CONNECT_TIMEOUT_MS = 30_000;
+export const CONNECT_TIMEOUT_MS = 40_000;
 export const STALL_TIMEOUT_MS = 120_000;
-export const DEFAULT_COOLDOWN_MS = 14_400_000; // 4 hours
+export const DEFAULT_COOLDOWN_MS = 1_800_000; // 30 minutes
 export const SLOW_KEY_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
 
 // How much of a stream we are willing to buffer while looking for an early
@@ -23,20 +23,56 @@ export const STREAM_PEEK_MS = 8_000;
 const LIMIT_ERROR_TYPES = ['rate_limit_error', 'overloaded_error'];
 const LIMIT_ERROR_SUBSTRINGS = [
   'rate limit',
-  'quota',
-  'credit',
+  'too many requests',
   'usage limit',
   'token limit',
-  'insufficient',
-  'exhausted',
   'overloaded',
+  'concurrency',
+  'throttled',
+];
+
+// Strings/types that mean "this key is invalid/revoked/billing failed → do not use".
+const INVALID_ERROR_TYPES = ['invalid_request_error', 'authentication_error', 'permission_error'];
+const INVALID_ERROR_SUBSTRINGS = [
+  'invalid api key',
+  'invalid key',
+  'key is invalid',
+  'unauthorized',
+  'forbidden',
+  'revoked',
+  'disabled',
+  'deleted',
+  'inactive key',
+  'permission',
+  'scope',
+  'insufficient credit',
+  'insufficient balance',
+  'out of credit',
+  'exhausted credit',
+  'quota exceeded',
+  'credit card',
+  'billing status',
+  'payment required',
 ];
 
 export function isLimitError(errType?: string, errMsg?: string): boolean {
   const t = (errType || '').toLowerCase();
   const m = (errMsg || '').toLowerCase();
   if (t && LIMIT_ERROR_TYPES.includes(t)) return true;
+
+  // If the error message indicates an invalid key or permission issue, it is not a rate limit
+  const isInvalid = INVALID_ERROR_SUBSTRINGS.some((s) => m.includes(s)) || INVALID_ERROR_TYPES.includes(t);
+  if (isInvalid) return false;
+
   if (m && LIMIT_ERROR_SUBSTRINGS.some((s) => m.includes(s))) return true;
+  return false;
+}
+
+export function isInvalidError(errType?: string, errMsg?: string): boolean {
+  const t = (errType || '').toLowerCase();
+  const m = (errMsg || '').toLowerCase();
+  if (t && INVALID_ERROR_TYPES.includes(t)) return true;
+  if (m && INVALID_ERROR_SUBSTRINGS.some((s) => m.includes(s))) return true;
   return false;
 }
 
@@ -55,6 +91,24 @@ export function classifyErrorPayload(payload: unknown): boolean {
   if (typeof err === 'object') {
     const obj = err as { type?: string; message?: string };
     return isLimitError(obj.type, obj.message);
+  }
+  return false;
+}
+
+// Inspect a decoded error payload for key invalidation (revoked, billing failed, etc.).
+export function classifyInvalidPayload(payload: unknown): boolean {
+  if (!payload || typeof payload !== 'object') return false;
+  const err = (payload as { error?: unknown }).error;
+  if (!err) {
+    const top = payload as { type?: string; message?: string };
+    return isInvalidError(top.type, top.message);
+  }
+  if (typeof err === 'string') {
+    return isInvalidError(undefined, err);
+  }
+  if (typeof err === 'object') {
+    const obj = err as { type?: string; message?: string };
+    return isInvalidError(obj.type, obj.message);
   }
   return false;
 }
