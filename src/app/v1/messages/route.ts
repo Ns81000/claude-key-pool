@@ -233,9 +233,10 @@ export async function POST(req: NextRequest) {
     }
 
     // Non-streaming success.
+    const textBody = await upstream.text();
     decrementInFlight(key.id);
     logRequestComplete(reqId, key.email, Date.now() - startTime);
-    return new Response(upstream.body, {
+    return new Response(textBody, {
       status: upstream.status,
       statusText: upstream.statusText,
       headers: buildResponseHeaders(upstream, false),

@@ -178,7 +178,8 @@ export async function GET(req: NextRequest) {
 
     decrementInFlight(key.id);
     logRequestComplete(reqId, key.email, Date.now() - startTime);
-    return new Response(upstream.body, {
+    const textBody = await upstream.text();
+    return new Response(textBody, {
       status: upstream.status,
       headers: buildResponseHeaders(upstream, false),
     });
