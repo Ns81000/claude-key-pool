@@ -329,6 +329,8 @@ export function connectToClaude(config: AppConfig): AppConfig {
   settingsJson.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'claude-opus-4-8';
   settingsJson.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'claude-opus-4-8';
   settingsJson.env.ANTHROPIC_DEFAULT_FABLE_MODEL = 'claude-opus-4-8';
+  settingsJson.env.CLAUDE_CODE_EFFORT_LEVEL = 'high';
+  settingsJson.effortLevel = 'high';
 
   const tmp = CLAUDE_SETTINGS_PATH + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(settingsJson, null, 2), 'utf-8');
