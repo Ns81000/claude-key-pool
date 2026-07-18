@@ -76,13 +76,22 @@ function TextInput({
   );
 }
 
-function StatusChip({ status, cooldownUntil, inFlight }: { status: string; cooldownUntil: string | null; inFlight: number }) {
+function StatusChip({ status, cooldownUntil, inFlight, disabled }: { status: string; cooldownUntil: string | null; inFlight: number; disabled?: boolean }) {
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
     if (status !== 'rate-limited' || !cooldownUntil) return;
     const t = setInterval(() => setNowMs(Date.now()), 1000);
     return () => clearInterval(t);
   }, [status, cooldownUntil]);
+
+  if (disabled) {
+    return (
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[6px] text-[12px] font-medium bg-surface-soft border border-hairline text-muted">
+        <Power className="w-3.5 h-3.5" />
+        Disabled
+      </span>
+    );
+  }
 
   if (status === 'rate-limited') {
     let remaining = '';
@@ -396,6 +405,39 @@ export default function Home() {
     }
   };
 
+  const toggleGroupDisabled = async (group: GroupView) => {
+    if (!config) return;
+    const groups = config.groups.map((g) =>
+      g.id === group.id ? { ...g, disabled: !g.disabled } : g,
+    );
+    try {
+      await saveGroups(groups);
+      pushToast(`Group ${group.disabled ? 'enabled' : 'disabled'}`);
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : 'Error', 'error');
+    }
+  };
+
+  const toggleKeyDisabled = async (group: GroupView, key: KeyView) => {
+    if (!config) return;
+    const groups = config.groups.map((g) =>
+      g.id === group.id
+        ? {
+            ...g,
+            keys: g.keys.map((k) =>
+              k.id === key.id ? { ...k, disabled: !k.disabled } : k,
+            ),
+          }
+        : g,
+    );
+    try {
+      await saveGroups(groups);
+      pushToast(`Key ${key.disabled ? 'enabled' : 'disabled'}`);
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : 'Error', 'error');
+    }
+  };
+
   const deleteGroup = (group: GroupView) => {
     if (!config) return;
     setConfirm({
@@ -685,9 +727,9 @@ export default function Home() {
               <div className="flex flex-col gap-2">
                 {config?.groups.map((group) => {
                   const isActive = config.activeGroupId === group.id;
-                  const groupActiveKeys = group.keys.filter(k => k.status === 'active').length;
-                  const groupLimitedKeys = group.keys.filter(k => k.status === 'rate-limited').length;
-                  const groupInvalidKeys = group.keys.filter(k => k.status === 'invalid').length;
+                  const groupActiveKeys = group.disabled ? 0 : group.keys.filter(k => !k.disabled && k.status === 'active').length;
+                  const groupLimitedKeys = group.disabled ? 0 : group.keys.filter(k => !k.disabled && k.status === 'rate-limited').length;
+                  const groupInvalidKeys = group.disabled ? 0 : group.keys.filter(k => !k.disabled && k.status === 'invalid').length;
                   return (
                     <div
                       key={group.id}
@@ -707,20 +749,37 @@ export default function Home() {
                                 : 'fill-transparent text-border-strong'
                             }`}
                           />
-                          <span className="text-[14px] font-medium text-ink truncate">
+                          <span className={`text-[14px] font-medium truncate ${group.disabled ? 'text-muted line-through' : 'text-ink'}`}>
                             {group.name}
                           </span>
+                          {group.disabled && (
+                            <span className="text-[10px] uppercase font-bold text-muted ml-1 bg-surface-soft px-1.5 py-0.5 rounded-[4px] border border-hairline">Disabled</span>
+                          )}
                         </div>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            deleteGroup(group);
-                          }}
-                          className="opacity-0 group-hover:opacity-100 text-muted hover:text-[color:var(--color-status-invalid)] transition cursor-pointer"
-                          aria-label="Delete group"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              toggleGroupDisabled(group);
+                            }}
+                            className={`opacity-0 group-hover:opacity-100 transition cursor-pointer ${group.disabled ? 'text-[color:var(--color-status-ready)] hover:text-ink' : 'text-muted hover:text-ink'}`}
+                            aria-label={group.disabled ? 'Enable group' : 'Disable group'}
+                            title={group.disabled ? 'Enable group' : 'Disable group'}
+                          >
+                            <Power className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              deleteGroup(group);
+                            }}
+                            className="opacity-0 group-hover:opacity-100 text-muted hover:text-[color:var(--color-status-invalid)] transition cursor-pointer"
+                            aria-label="Delete group"
+                            title="Delete group"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </div>
                       <div className="flex items-center gap-2 ml-4 mt-0.5">
                         <span className="text-[12px] text-muted">
@@ -835,19 +894,35 @@ export default function Home() {
                           }`}
                         >
                           <div className="flex-1 min-w-0">
-                            <div className="text-[14px] text-ink truncate">{key.email}</div>
-                            <div className="text-[13px] font-mono text-muted truncate">
+                            <div className={`text-[14px] truncate flex items-center gap-2 ${key.disabled ? 'text-muted line-through' : 'text-ink'}`}>
+                              {key.email}
+                              {key.disabled && (
+                                <span className="text-[10px] uppercase font-bold text-muted bg-surface-soft px-1.5 py-0.5 rounded-[4px] border border-hairline no-underline">Disabled</span>
+                              )}
+                            </div>
+                            <div className={`text-[13px] font-mono truncate ${key.disabled ? 'text-muted opacity-60' : 'text-muted'}`}>
                               {maskKey(key.key)}
                             </div>
                           </div>
-                          <StatusChip status={key.status} cooldownUntil={key.cooldownUntil} inFlight={key.inFlight} />
-                          <button
-                            onClick={() => deleteKey(key)}
-                            className="opacity-0 group-hover:opacity-100 text-muted hover:text-[color:var(--color-status-invalid)] transition cursor-pointer"
-                            aria-label="Delete key"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
+                          <StatusChip status={key.status} cooldownUntil={key.cooldownUntil} inFlight={key.inFlight} disabled={key.disabled} />
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => toggleKeyDisabled(activeGroup, key)}
+                              className={`opacity-0 group-hover:opacity-100 transition cursor-pointer ${key.disabled ? 'text-[color:var(--color-status-ready)] hover:text-ink' : 'text-muted hover:text-ink'}`}
+                              aria-label={key.disabled ? 'Enable key' : 'Disable key'}
+                              title={key.disabled ? 'Enable key' : 'Disable key'}
+                            >
+                              <Power className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={() => deleteKey(key)}
+                              className="opacity-0 group-hover:opacity-100 text-muted hover:text-[color:var(--color-status-invalid)] transition cursor-pointer"
+                              aria-label="Delete key"
+                              title="Delete key"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
                         </div>
                       ))}
                     </div>
