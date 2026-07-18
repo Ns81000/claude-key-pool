@@ -243,7 +243,7 @@ export function getNextCandidate(config: AppConfig): { group: GroupConfig; key: 
 }
 
 // Build the upstream request headers: copy client headers minus hop-by-hop and
-// auth, inject the pool key, and force identity encoding.
+// auth, inject the pool key.
 export function buildUpstreamHeaders(clientHeaders: Headers, apiKey: string): Headers {
   const headers = new Headers();
   for (const [name, value] of clientHeaders.entries()) {
@@ -253,15 +253,13 @@ export function buildUpstreamHeaders(clientHeaders: Headers, apiKey: string): He
       lower === 'content-length' ||
       lower === 'connection' ||
       lower === 'x-api-key' ||
-      lower === 'authorization' ||
-      lower === 'accept-encoding'
+      lower === 'authorization'
     ) {
       continue;
     }
     headers.set(name, value);
   }
   headers.set('x-api-key', apiKey);
-  headers.set('accept-encoding', 'identity');
   return headers;
 }
 
