@@ -129,12 +129,26 @@ export function logPoolStatus() {
     const config = loadConfig();
     const flatKeys: { email: string; groupName: string; keyId: string }[] = [];
     for (const g of config.groups) {
+      if (g.disabled) continue;
       for (const k of g.keys) {
+        if (k.disabled) continue;
         flatKeys.push({ email: k.email, groupName: g.name, keyId: k.id });
       }
     }
 
-    if (flatKeys.length === 0) {
+    // Count disabled items for the summary line
+    let disabledGroups = 0;
+    let disabledKeys = 0;
+    for (const g of config.groups) {
+      if (g.disabled) {
+        disabledGroups++;
+        disabledKeys += g.keys.length;
+      } else {
+        disabledKeys += g.keys.filter(k => k.disabled).length;
+      }
+    }
+
+    if (flatKeys.length === 0 && disabledKeys === 0) {
       proxyLog('POOL', undefined, 'No keys configured. Add keys at http://localhost:9999');
       return;
     }
@@ -154,16 +168,24 @@ export function logPoolStatus() {
     ];
     if (limited > 0) parts.push(`${YELLOW}${limited} rate-limited${RESET}`);
     if (invalid > 0) parts.push(`${RED}${invalid} invalid${RESET}`);
+    if (disabledKeys > 0) parts.push(`${DIM}${disabledKeys} disabled${RESET}`);
     if (totalInFlight > 0) parts.push(`${CYAN}${totalInFlight} in-flight${RESET}`);
 
     proxyLog('POOL', undefined, `Pool: ${parts.join(`${DIM} · ${RESET}`)}`);
 
     // Show groups summary
     for (const g of config.groups) {
-      const gActive = g.keys.filter(k => getKeyState(k.id).status === 'active').length;
-      const gTotal = g.keys.length;
+      if (g.disabled) {
+        proxyLog('POOL', undefined, `  ${DIM}├─${RESET} ${g.name} ${DIM}(disabled — ${g.keys.length} keys)${RESET}`);
+        continue;
+      }
+      const enabledKeys = g.keys.filter(k => !k.disabled);
+      const gDisabled = g.keys.length - enabledKeys.length;
+      const gActive = enabledKeys.filter(k => getKeyState(k.id).status === 'active').length;
+      const gTotal = enabledKeys.length;
       const statusColor = gActive === gTotal ? GREEN : gActive > 0 ? YELLOW : RED;
-      proxyLog('POOL', undefined, `  ${DIM}├─${RESET} ${g.name} ${statusColor}(${gActive}/${gTotal} active)${RESET} → ${DIM}${g.targetUrl || '(no URL)'}${RESET}`);
+      const disabledTag = gDisabled > 0 ? ` ${DIM}(${gDisabled} disabled)${RESET}` : '';
+      proxyLog('POOL', undefined, `  ${DIM}├─${RESET} ${g.name} ${statusColor}(${gActive}/${gTotal} active)${RESET}${disabledTag} → ${DIM}${g.targetUrl || '(no URL)'}${RESET}`);
     }
   } catch {
     // Config not loaded yet — skip

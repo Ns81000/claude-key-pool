@@ -25,6 +25,7 @@ Claude Key Pool sits between the Claude Code CLI (or any Anthropic-compatible SD
 
 - **True round-robin** — every request gets a different key. No more burning through one key before touching the next.
 - **Flat global pool** — all keys from all groups participate equally. Each key still routes through its own group's upstream URL and respects its group's cooldown settings.
+- **Disable without deleting** — temporarily disable individual keys or entire groups from the dashboard. Disabled items are skipped during routing and stay off until you re-enable them.
 - **Concurrency-aware** — tracks in-flight requests per key and prefers idle keys, preventing multiple simultaneous requests from piling onto the same key.
 - **Mid-stream aware** — detects error events emitted *inside* a streaming (SSE) response before any content reaches you, and silently retries on a working key. You see one clean stream.
 - **Stall protection** — if an upstream stops sending data mid-stream, the proxy aborts after 120 seconds instead of hanging forever.
@@ -33,7 +34,7 @@ Claude Key Pool sits between the Claude Code CLI (or any Anthropic-compatible SD
 - **Robust & fast** — reads config from an in-memory cache on the hot path (no filesystem stat per request), never writes to disk per request, and forwards request bodies without needless re-serialization.
 - **Groups** — organize keys by upstream endpoint. Each group has its own target URL and optional custom cooldown duration.
 - **Live terminal logs** — color-coded, real-time request lifecycle logging with request IDs, key selection, rotation reasons, timing, and pool status summaries.
-- **Minimal dashboard** — a calm, editorial UI at `http://localhost:9999` with a global pool stats banner showing total/active/rate-limited/invalid/in-flight counts per key.
+- **Minimal dashboard** — a calm, editorial UI at `http://localhost:9999` with a global pool stats banner showing total/active/rate-limited/invalid/disabled/in-flight counts per key.
 
 ---
 
@@ -74,11 +75,12 @@ This stops any running server, pulls the latest code, reinstalls dependencies, r
 
 1. **Create a group** — click `+`, give it a name and the upstream URL (e.g. `https://api.anthropic.com`). Optionally set a custom rate-limit cooldown duration (in hours).
 2. **Add keys** — one at a time, with an optional email/label. Keys are stored locally in `config.json` (which is git-ignored and never leaves your machine).
-3. **Connect Claude Code** — click **Connect** in the top bar. It rewrites your Claude CLI `settings.json` to route through the proxy (and backs up the original, restored on **Disconnect** — or automatically when you **Stop the server** from the dashboard).
+3. **Disable/enable** — use the toggle switch next to any group or key to temporarily disable it without deleting. Disabled items are skipped during routing and shown dimmed in the UI. Re-enable any time with one click.
+4. **Connect Claude Code** — click **Connect** in the top bar. It rewrites your Claude CLI `settings.json` to route through the proxy (and backs up the original, restored on **Disconnect** — or automatically when you **Stop the server** from the dashboard).
 
-The **pool stats banner** at the top shows the real-time health of your entire key pool: total keys, active, rate-limited, invalid, and in-flight requests.
+The **pool stats banner** at the top shows the real-time health of your entire key pool: total keys, active, rate-limited, invalid, disabled, and in-flight requests.
 
-All keys from all groups are pooled together for routing. Groups are an organizational tool — they let you set different upstream URLs and cooldown settings per provider, but every key participates in the global round-robin equally.
+All keys from all groups are pooled together for routing (unless disabled). Groups are an organizational tool — they let you set different upstream URLs and cooldown settings per provider, but every enabled key participates in the global round-robin equally.
 
 Prefer manual setup? Point any Anthropic SDK at the proxy:
 
