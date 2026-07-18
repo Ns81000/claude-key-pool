@@ -324,6 +324,11 @@ export function connectToClaude(config: AppConfig): AppConfig {
 
   settingsJson.env.ANTHROPIC_BASE_URL = 'http://localhost:9999';
   settingsJson.env.ANTHROPIC_API_KEY = 'sk-ant-dummy-rotated-by-key-pool-proxy-9999';
+  settingsJson.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
+  settingsJson.env.ANTHROPIC_DEFAULT_OPUS_MODEL = 'claude-opus-4-8';
+  settingsJson.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'claude-opus-4-8';
+  settingsJson.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'claude-opus-4-8';
+  settingsJson.env.ANTHROPIC_DEFAULT_FABLE_MODEL = 'claude-opus-4-8';
 
   const tmp = CLAUDE_SETTINGS_PATH + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(settingsJson, null, 2), 'utf-8');
