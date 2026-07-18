@@ -9,7 +9,6 @@ export interface KeyConfig {
   id: string;
   email: string;
   key: string;
-  disabled?: boolean;
 }
 
 export interface GroupConfig {
@@ -18,7 +17,6 @@ export interface GroupConfig {
   targetUrl: string;
   keys: KeyConfig[];
   rateLimitCooldownHours?: number;
-  disabled?: boolean;
 }
 
 export interface AppConfig {
@@ -244,10 +242,9 @@ export function buildConfigView(config: AppConfig): AppConfigView {
     keys: g.keys.map((k) => {
       const view = keyStatusView(k.id);
       totalKeys++;
-      const isDisabled = g.disabled || k.disabled;
-      if (!isDisabled && view.status === 'active') activeKeys++;
-      else if (!isDisabled && view.status === 'rate-limited') rateLimitedKeys++;
-      else if (!isDisabled && view.status === 'invalid') invalidKeys++;
+      if (view.status === 'active') activeKeys++;
+      else if (view.status === 'rate-limited') rateLimitedKeys++;
+      else if (view.status === 'invalid') invalidKeys++;
       totalInFlight += view.inFlight;
       return { ...k, ...view, groupName: g.name };
     }),

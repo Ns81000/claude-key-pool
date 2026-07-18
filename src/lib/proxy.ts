@@ -161,9 +161,7 @@ export interface FlatPoolEntry {
 export function buildFlatPool(config: AppConfig): FlatPoolEntry[] {
   const pool: FlatPoolEntry[] = [];
   for (const group of config.groups) {
-    if (group.disabled) continue;
     for (const key of group.keys) {
-      if (key.disabled) continue;
       pool.push({ group, key });
     }
   }
