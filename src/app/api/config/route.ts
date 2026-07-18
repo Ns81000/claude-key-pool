@@ -19,11 +19,13 @@ function sanitizeGroups(groups: unknown): GroupConfig[] {
     name: String(g.name ?? 'Untitled'),
     targetUrl: String(g.targetUrl ?? ''),
     rateLimitCooldownHours: typeof g.rateLimitCooldownHours === 'number' ? g.rateLimitCooldownHours : undefined,
+    disabled: g.disabled === true ? true : undefined,
     keys: Array.isArray(g.keys)
       ? g.keys.map((k: Record<string, unknown>) => ({
           id: String(k.id),
           email: String(k.email ?? ''),
           key: String(k.key ?? ''),
+          disabled: k.disabled === true ? true : undefined,
         }))
       : [],
   }));

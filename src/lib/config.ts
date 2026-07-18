@@ -9,6 +9,7 @@ export interface KeyConfig {
   id: string;
   email: string;
   key: string;
+  disabled?: boolean;
 }
 
 export interface GroupConfig {
@@ -17,6 +18,7 @@ export interface GroupConfig {
   targetUrl: string;
   keys: KeyConfig[];
   rateLimitCooldownHours?: number;
+  disabled?: boolean;
 }
 
 export interface AppConfig {
@@ -48,6 +50,7 @@ export interface PoolStats {
   activeKeys: number;
   rateLimitedKeys: number;
   invalidKeys: number;
+  disabledKeys: number;
   totalInFlight: number;
 }
 
@@ -111,10 +114,12 @@ function readConfigFromDisk(): AppConfig {
         name: String(g.name ?? 'Untitled'),
         targetUrl: String(g.targetUrl ?? ''),
         rateLimitCooldownHours: typeof g.rateLimitCooldownHours === 'number' ? g.rateLimitCooldownHours : undefined,
+        disabled: g.disabled === true ? true : undefined,
         keys: (g.keys || []).map((k: any) => ({
           id: String(k.id),
           email: String(k.email ?? ''),
           key: String(k.key ?? ''),
+          disabled: k.disabled === true ? true : undefined,
         })),
       }));
       return {
@@ -235,6 +240,7 @@ export function buildConfigView(config: AppConfig): AppConfigView {
   let activeKeys = 0;
   let rateLimitedKeys = 0;
   let invalidKeys = 0;
+  let disabledKeys = 0;
   let totalInFlight = 0;
 
   const groups = config.groups.map((g) => ({
@@ -242,7 +248,9 @@ export function buildConfigView(config: AppConfig): AppConfigView {
     keys: g.keys.map((k) => {
       const view = keyStatusView(k.id);
       totalKeys++;
-      if (view.status === 'active') activeKeys++;
+      if (k.disabled || g.disabled) {
+        disabledKeys++;
+      } else if (view.status === 'active') activeKeys++;
       else if (view.status === 'rate-limited') rateLimitedKeys++;
       else if (view.status === 'invalid') invalidKeys++;
       totalInFlight += view.inFlight;
@@ -253,7 +261,7 @@ export function buildConfigView(config: AppConfig): AppConfigView {
   return {
     ...config,
     groups,
-    poolStats: { totalKeys, activeKeys, rateLimitedKeys, invalidKeys, totalInFlight },
+    poolStats: { totalKeys, activeKeys, rateLimitedKeys, invalidKeys, disabledKeys, totalInFlight },
   };
 }
 

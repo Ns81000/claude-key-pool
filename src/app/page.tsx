@@ -13,6 +13,7 @@ import {
   Power,
   Zap,
   Activity,
+  Ban,
 } from 'lucide-react';
 import type { AppConfigView, GroupView, KeyView, PoolStats } from '@/lib/config';
 
@@ -76,13 +77,62 @@ function TextInput({
   );
 }
 
-function StatusChip({ status, cooldownUntil, inFlight }: { status: string; cooldownUntil: string | null; inFlight: number }) {
+function ToggleSwitch({
+  enabled,
+  onChange,
+  size = 'md',
+  title,
+}: {
+  enabled: boolean;
+  onChange: (enabled: boolean) => void;
+  size?: 'sm' | 'md';
+  title?: string;
+}) {
+  const w = size === 'sm' ? 'w-8' : 'w-10';
+  const h = size === 'sm' ? 'h-[18px]' : 'h-[22px]';
+  const dot = size === 'sm' ? 'w-3.5 h-3.5' : 'w-4.5 h-4.5';
+  const travel = size === 'sm' ? 'translate-x-[14px]' : 'translate-x-[18px]';
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={enabled}
+      title={title}
+      onClick={(e) => {
+        e.stopPropagation();
+        onChange(!enabled);
+      }}
+      className={`${w} ${h} rounded-full relative cursor-pointer transition-colors duration-200 shrink-0 ${
+        enabled
+          ? 'bg-[color:var(--color-status-ready)]'
+          : 'bg-[color:var(--color-border-strong)]'
+      }`}
+    >
+      <span
+        className={`absolute top-[2px] left-[2px] ${dot} rounded-full bg-white shadow-sm transition-transform duration-200 ${
+          enabled ? travel : 'translate-x-0'
+        }`}
+      />
+    </button>
+  );
+}
+
+function StatusChip({ status, cooldownUntil, inFlight, disabled }: { status: string; cooldownUntil: string | null; inFlight: number; disabled?: boolean }) {
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
     if (status !== 'rate-limited' || !cooldownUntil) return;
     const t = setInterval(() => setNowMs(Date.now()), 1000);
     return () => clearInterval(t);
   }, [status, cooldownUntil]);
+
+  if (disabled) {
+    return (
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[6px] text-[12px] font-medium bg-surface-strong/50 text-muted">
+        <Ban className="w-3.5 h-3.5" />
+        Disabled
+      </span>
+    );
+  }
 
   if (status === 'rate-limited') {
     let remaining = '';
@@ -125,7 +175,7 @@ function StatusChip({ status, cooldownUntil, inFlight }: { status: string; coold
 
 function PoolStatsBanner({ stats }: { stats: PoolStats }) {
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+    <div className="grid grid-cols-2 sm:grid-cols-6 gap-3">
       <StatCard label="Total Keys" value={stats.totalKeys} />
       <StatCard
         label="Active"
@@ -141,6 +191,12 @@ function PoolStatsBanner({ stats }: { stats: PoolStats }) {
         label="Invalid"
         value={stats.invalidKeys}
         color="var(--color-status-invalid)"
+      />
+      <StatCard
+        label="Disabled"
+        value={stats.disabledKeys}
+        color="var(--color-border-strong)"
+        icon={<Ban className="w-3.5 h-3.5" />}
       />
       <StatCard
         label="In-Flight"
@@ -507,6 +563,49 @@ export default function Home() {
     });
   };
 
+  const toggleGroupDisabled = async (groupId: string) => {
+    if (!config) return;
+    const groups = config.groups.map((g) =>
+      g.id === groupId ? { ...g, disabled: !g.disabled } : g,
+    );
+    try {
+      await saveGroups(groups);
+      const group = config.groups.find((g) => g.id === groupId);
+      pushToast(
+        group?.disabled
+          ? `Group "${group.name}" enabled`
+          : `Group "${group?.name}" disabled`,
+      );
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : 'Error', 'error');
+    }
+  };
+
+  const toggleKeyDisabled = async (keyId: string) => {
+    if (!config || !activeGroup) return;
+    const groups = config.groups.map((g) =>
+      g.id === activeGroup.id
+        ? {
+            ...g,
+            keys: g.keys.map((k) =>
+              k.id === keyId ? { ...k, disabled: !k.disabled } : k,
+            ),
+          }
+        : g,
+    );
+    try {
+      await saveGroups(groups);
+      const key = activeGroup.keys.find((k) => k.id === keyId);
+      pushToast(
+        key?.disabled
+          ? `Key "${key.email}" enabled`
+          : `Key "${key?.email}" disabled`,
+      );
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : 'Error', 'error');
+    }
+  };
+
   const toggleConnection = async () => {
     if (!config) return;
     const action = config.isConnected ? 'disconnect' : 'connect';
@@ -567,6 +666,7 @@ export default function Home() {
     activeKeys: 0,
     rateLimitedKeys: 0,
     invalidKeys: 0,
+    disabledKeys: 0,
     totalInFlight: 0,
   };
 
@@ -685,61 +785,89 @@ export default function Home() {
               <div className="flex flex-col gap-2">
                 {config?.groups.map((group) => {
                   const isActive = config.activeGroupId === group.id;
-                  const groupActiveKeys = group.keys.filter(k => k.status === 'active').length;
-                  const groupLimitedKeys = group.keys.filter(k => k.status === 'rate-limited').length;
-                  const groupInvalidKeys = group.keys.filter(k => k.status === 'invalid').length;
+                  const isGroupDisabled = !!group.disabled;
+                  const groupActiveKeys = group.keys.filter(k => !k.disabled && k.status === 'active').length;
+                  const groupLimitedKeys = group.keys.filter(k => !k.disabled && k.status === 'rate-limited').length;
+                  const groupInvalidKeys = group.keys.filter(k => !k.disabled && k.status === 'invalid').length;
+                  const groupDisabledKeys = group.keys.filter(k => k.disabled).length;
                   return (
                     <div
                       key={group.id}
                       onClick={() => selectGroup(group.id)}
-                      className={`group px-4 py-3 rounded-[10px] border cursor-pointer transition-colors ${
+                      className={`group/card px-4 py-3 rounded-[10px] border cursor-pointer transition-all duration-200 ${
                         isActive
                           ? 'border-ink bg-surface-soft'
                           : 'border-hairline hover:border-border-strong'
-                      }`}
+                      } ${isGroupDisabled ? 'opacity-50' : ''}`}
                     >
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2 min-w-0">
                           <Circle
                             className={`w-2 h-2 shrink-0 ${
-                              isActive
-                                ? 'fill-ink text-ink'
-                                : 'fill-transparent text-border-strong'
+                              isGroupDisabled
+                                ? 'fill-border-strong text-border-strong'
+                                : isActive
+                                  ? 'fill-ink text-ink'
+                                  : 'fill-transparent text-border-strong'
                             }`}
                           />
-                          <span className="text-[14px] font-medium text-ink truncate">
+                          <span className={`text-[14px] font-medium truncate ${
+                            isGroupDisabled ? 'text-muted line-through' : 'text-ink'
+                          }`}>
                             {group.name}
                           </span>
                         </div>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            deleteGroup(group);
-                          }}
-                          className="opacity-0 group-hover:opacity-100 text-muted hover:text-[color:var(--color-status-invalid)] transition cursor-pointer"
-                          aria-label="Delete group"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        <div className="flex items-center gap-1.5">
+                          <ToggleSwitch
+                            enabled={!isGroupDisabled}
+                            onChange={() => toggleGroupDisabled(group.id)}
+                            size="sm"
+                            title={isGroupDisabled ? 'Enable group' : 'Disable group'}
+                          />
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              deleteGroup(group);
+                            }}
+                            className="opacity-0 group-hover/card:opacity-100 text-muted hover:text-[color:var(--color-status-invalid)] transition cursor-pointer"
+                            aria-label="Delete group"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </div>
                       <div className="flex items-center gap-2 ml-4 mt-0.5">
-                        <span className="text-[12px] text-muted">
-                          {group.keys.length} key{group.keys.length === 1 ? '' : 's'}
-                        </span>
-                        {groupActiveKeys > 0 && (
-                          <span className="text-[11px] text-[color:var(--color-status-ready)]">
-                            {groupActiveKeys} active
+                        {isGroupDisabled ? (
+                          <span className="text-[12px] text-muted flex items-center gap-1">
+                            <Ban className="w-3 h-3" />
+                            Disabled
                           </span>
-                        )}
-                        {groupLimitedKeys > 0 && (
-                          <span className="text-[11px] text-[color:var(--color-status-limited)]">
-                            {groupLimitedKeys} limited
-                          </span>
-                        )}
-                        {groupInvalidKeys > 0 && (
-                          <span className="text-[11px] text-[color:var(--color-status-invalid)]">
-                            {groupInvalidKeys} invalid
-                          </span>
+                        ) : (
+                          <>
+                            <span className="text-[12px] text-muted">
+                              {group.keys.length} key{group.keys.length === 1 ? '' : 's'}
+                            </span>
+                            {groupActiveKeys > 0 && (
+                              <span className="text-[11px] text-[color:var(--color-status-ready)]">
+                                {groupActiveKeys} active
+                              </span>
+                            )}
+                            {groupLimitedKeys > 0 && (
+                              <span className="text-[11px] text-[color:var(--color-status-limited)]">
+                                {groupLimitedKeys} limited
+                              </span>
+                            )}
+                            {groupInvalidKeys > 0 && (
+                              <span className="text-[11px] text-[color:var(--color-status-invalid)]">
+                                {groupInvalidKeys} invalid
+                              </span>
+                            )}
+                            {groupDisabledKeys > 0 && (
+                              <span className="text-[11px] text-muted">
+                                {groupDisabledKeys} off
+                              </span>
+                            )}
+                          </>
                         )}
                       </div>
                     </div>
@@ -827,29 +955,46 @@ export default function Home() {
                     </div>
                   ) : (
                     <div className="border border-hairline rounded-[10px] overflow-hidden">
-                      {activeGroup.keys.map((key, i) => (
-                        <div
-                          key={key.id}
-                          className={`group flex items-center gap-4 px-4 py-3.5 ${
-                            i > 0 ? 'border-t border-hairline' : ''
-                          }`}
-                        >
-                          <div className="flex-1 min-w-0">
-                            <div className="text-[14px] text-ink truncate">{key.email}</div>
-                            <div className="text-[13px] font-mono text-muted truncate">
-                              {maskKey(key.key)}
-                            </div>
-                          </div>
-                          <StatusChip status={key.status} cooldownUntil={key.cooldownUntil} inFlight={key.inFlight} />
-                          <button
-                            onClick={() => deleteKey(key)}
-                            className="opacity-0 group-hover:opacity-100 text-muted hover:text-[color:var(--color-status-invalid)] transition cursor-pointer"
-                            aria-label="Delete key"
+                      {activeGroup.keys.map((key, i) => {
+                        const isKeyDisabled = !!key.disabled || !!activeGroup.disabled;
+                        const isKeyOwnDisabled = !!key.disabled;
+                        return (
+                          <div
+                            key={key.id}
+                            className={`group/row flex items-center gap-4 px-4 py-3.5 transition-opacity duration-200 ${
+                              i > 0 ? 'border-t border-hairline' : ''
+                            } ${isKeyDisabled ? 'opacity-50' : ''}`}
                           >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                      ))}
+                            <div className="flex-1 min-w-0">
+                              <div className={`text-[14px] truncate ${
+                                isKeyDisabled ? 'text-muted line-through' : 'text-ink'
+                              }`}>{key.email}</div>
+                              <div className="text-[13px] font-mono text-muted truncate">
+                                {maskKey(key.key)}
+                              </div>
+                            </div>
+                            <StatusChip
+                              status={key.status}
+                              cooldownUntil={key.cooldownUntil}
+                              inFlight={key.inFlight}
+                              disabled={isKeyDisabled}
+                            />
+                            <ToggleSwitch
+                              enabled={!isKeyOwnDisabled}
+                              onChange={() => toggleKeyDisabled(key.id)}
+                              size="sm"
+                              title={isKeyOwnDisabled ? 'Enable key' : 'Disable key'}
+                            />
+                            <button
+                              onClick={() => deleteKey(key)}
+                              className="opacity-0 group-hover/row:opacity-100 text-muted hover:text-[color:var(--color-status-invalid)] transition cursor-pointer"
+                              aria-label="Delete key"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
