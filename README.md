@@ -4,7 +4,7 @@
 
 # Claude Key Pool
 
-**A fast, local proxy that pools your Anthropic-compatible API keys and load-balances every request across the entire pool via true round-robin — rotating instantly when any key hits a rate or usage limit, including mid-stream.**
+**A fast, local proxy that pools your Anthropic-compatible API keys and load-balances every request across the entire pool via true round-robin — rotating instantly when any key hits a rate or usage limit, including mid-stream. Select your model once in the dashboard, and only matching groups participate in routing.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-181d26?style=flat-square)](LICENSE)
 [![Next.js 16](https://img.shields.io/badge/Next.js-16-181d26?style=flat-square&logo=nextdotjs&logoColor=white)](https://nextjs.org)
@@ -33,6 +33,7 @@ Claude Key Pool sits between the Claude Code CLI (or any Anthropic-compatible SD
 - **Slow-key deprioritization** — keys that recently timed out are ranked last, not skipped, so they get a second chance without dragging down the pool.
 - **Robust & fast** — reads config from an in-memory cache on the hot path (no filesystem stat per request), never writes to disk per request, and forwards request bodies without needless re-serialization.
 - **Groups** — organize keys by upstream endpoint. Each group has its own target URL and optional custom cooldown duration.
+- **Per-group model** — assign a model name to each group (e.g. `claude-opus-4-8`). Select the active model from the dashboard header; only groups matching that model are used for routing.
 - **Live terminal logs** — color-coded, real-time request lifecycle logging with request IDs, key selection, rotation reasons, timing, and pool status summaries.
 - **Minimal dashboard** — a calm, editorial UI at `http://localhost:9999` with a global pool stats banner showing total/active/rate-limited/invalid/disabled/in-flight counts per key.
 
@@ -73,14 +74,15 @@ This stops any running server, pulls the latest code, reinstalls dependencies, r
 
 ## Using the dashboard
 
-1. **Create a group** — click `+`, give it a name and the upstream URL (e.g. `https://api.anthropic.com`). Optionally set a custom rate-limit cooldown duration (in hours).
+1. **Create a group** — click `+`, give it a name, the upstream URL (e.g. `https://api.anthropic.com`), and a model name (e.g. `claude-opus-4-8`). Optionally set a custom rate-limit cooldown duration (in hours).
 2. **Add keys** — one at a time, with an optional email/label. Keys are stored locally in `config.json` (which is git-ignored and never leaves your machine).
-3. **Disable/enable** — use the toggle switch next to any group or key to temporarily disable it without deleting. Disabled items are skipped during routing and shown dimmed in the UI. Re-enable any time with one click.
-4. **Connect Claude Code** — click **Connect** in the top bar. It rewrites your Claude CLI `settings.json` to route through the proxy (and backs up the original, restored on **Disconnect** — or automatically when you **Stop the server** from the dashboard).
+3. **Select a model** — use the model dropdown in the header bar to choose which model to route through. Only groups with a matching model field are used.
+4. **Disable/enable** — use the toggle switch next to any group or key to temporarily disable it without deleting. Disabled items are skipped during routing and shown dimmed in the UI. Re-enable any time with one click.
+5. **Connect Claude Code** — click **Connect** in the top bar. It rewrites your Claude CLI `settings.json` to route through the proxy using the selected model (and backs up the original, restored on **Disconnect** — or automatically when you **Stop the server** from the dashboard).
 
 The **pool stats banner** at the top shows the real-time health of your entire key pool: total keys, active, rate-limited, invalid, disabled, and in-flight requests.
 
-All keys from all groups are pooled together for routing (unless disabled). Groups are an organizational tool — they let you set different upstream URLs and cooldown settings per provider, but every enabled key participates in the global round-robin equally.
+Only groups whose model matches the selected model participate in routing. Groups are an organizational tool — they let you set different upstream URLs, cooldown settings, and model names per provider.
 
 Prefer manual setup? Point any Anthropic SDK at the proxy:
 

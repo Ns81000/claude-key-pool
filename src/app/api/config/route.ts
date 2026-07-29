@@ -18,6 +18,7 @@ function sanitizeGroups(groups: unknown): GroupConfig[] {
     id: String(g.id),
     name: String(g.name ?? 'Untitled'),
     targetUrl: String(g.targetUrl ?? ''),
+    model: typeof g.model === 'string' && g.model ? g.model : undefined,
     rateLimitCooldownHours: typeof g.rateLimitCooldownHours === 'number' ? g.rateLimitCooldownHours : undefined,
     disabled: g.disabled === true ? true : undefined,
     keys: Array.isArray(g.keys)
@@ -53,9 +54,13 @@ export async function POST(req: NextRequest) {
           ...current,
           groups: sanitizeGroups(config.groups),
           activeGroupId: config.activeGroupId ?? current.activeGroupId,
+          selectedModel: typeof config.selectedModel === 'string' ? config.selectedModel : current.selectedModel,
         };
       }
       await saveConfig(current);
+      if (current.isConnected) {
+        try { connectToClaude(current); } catch { /* best-effort sync */ }
+      }
       return NextResponse.json(buildConfigView(current));
     }
 
@@ -76,6 +81,19 @@ export async function POST(req: NextRequest) {
     if (action === 'disconnect') {
       current = disconnectFromClaude(current);
       await saveConfig(current);
+      return NextResponse.json(buildConfigView(current));
+    }
+
+    if (action === 'setModel') {
+      const { selectedModel } = body;
+      current = { ...current, selectedModel: typeof selectedModel === 'string' && selectedModel ? selectedModel : null };
+      await saveConfig(current);
+      if (current.isConnected) {
+        try {
+          current = connectToClaude(current);
+          await saveConfig(current);
+        } catch { /* best-effort sync */ }
+      }
       return NextResponse.json(buildConfigView(current));
     }
 

@@ -43,6 +43,15 @@ export async function POST(req: NextRequest) {
   const reqId = nextRequestId();
   const startTime = Date.now();
 
+  if (!config.selectedModel) {
+    proxyLog('ERROR', undefined, `#${reqId} No model selected`);
+    return errorJson(
+      'invalid_request_error',
+      'No model selected. Open http://localhost:9999 and select a model from the header.',
+      400,
+    );
+  }
+
   if (config.groups.length === 0) {
     proxyLog('ERROR', undefined, `#${reqId} No groups or keys configured`);
     return errorJson(
@@ -67,15 +76,15 @@ export async function POST(req: NextRequest) {
 
   logSeparator();
   logRequestStart(reqId, 'POST', `/v1/messages`, isStream);
-  proxyLog('INFO', undefined, `#${reqId} Model: ${model}`);
+  proxyLog('INFO', undefined, `#${reqId} Model: ${model} (selected: ${config.selectedModel})`);
 
   let totalCandidatesTried = 0;
   let totalTransientFailures = 0;
 
-  const flatPoolSize = buildFlatPool(config).length;
+  const flatPoolSize = buildFlatPool(config, config.selectedModel).length;
 
   while (totalCandidatesTried < flatPoolSize) {
-    const candidate = getNextCandidate(config);
+    const candidate = getNextCandidate(config, config.selectedModel);
     if (!candidate) {
       break;
     }

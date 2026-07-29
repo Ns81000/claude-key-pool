@@ -1,10 +1,12 @@
 {
   "activeGroupId": "group_anthropic",
+  "selectedModel": "claude-opus-4-8",
   "groups": [
     {
       "id": "group_anthropic",
       "name": "Anthropic Official",
       "targetUrl": "https://api.anthropic.com",
+      "model": "claude-opus-4-8",
       "rateLimitCooldownHours": 5,
       "keys": [
         {
@@ -23,6 +25,7 @@
       "id": "group_freemodel_example",
       "name": "https://freemodel.dev/",
       "targetUrl": "https://cc.freemodel.dev",
+      "model": "claude-opus-4-8",
       "rateLimitCooldownHours": 5,
       "keys": [
         {

@@ -38,6 +38,13 @@ export async function GET(req: NextRequest) {
   const reqId = nextRequestId();
   const startTime = Date.now();
 
+  if (!config.selectedModel) {
+    return NextResponse.json(
+      { error: 'No model selected. Open http://localhost:9999 and select a model from the header.' },
+      { status: 400 }
+    );
+  }
+
   if (config.groups.length === 0) {
     return NextResponse.json(
       { error: 'No groups or keys configured in Claude Key Pool. Open http://localhost:9999 and configure them.' },
@@ -51,10 +58,10 @@ export async function GET(req: NextRequest) {
   let totalCandidatesTried = 0;
   let totalTransientFailures = 0;
 
-  const flatPoolSize = buildFlatPool(config).length;
+  const flatPoolSize = buildFlatPool(config, config.selectedModel).length;
 
   while (totalCandidatesTried < flatPoolSize) {
-    const candidate = getNextCandidate(config);
+    const candidate = getNextCandidate(config, config.selectedModel);
     if (!candidate) {
       break;
     }

@@ -173,6 +173,13 @@ export function logPoolStatus() {
 
     proxyLog('POOL', undefined, `Pool: ${parts.join(`${DIM} · ${RESET}`)}`);
 
+    const selectedModel = config.selectedModel;
+    if (selectedModel) {
+      proxyLog('POOL', undefined, `  ${DIM}Model:${RESET} ${WHITE}${selectedModel}${RESET}`);
+    } else {
+      proxyLog('POOL', undefined, `  ${YELLOW}⚠ No model selected — requests will be blocked${RESET}`);
+    }
+
     // Show groups summary
     for (const g of config.groups) {
       if (g.disabled) {
@@ -185,7 +192,8 @@ export function logPoolStatus() {
       const gTotal = enabledKeys.length;
       const statusColor = gActive === gTotal ? GREEN : gActive > 0 ? YELLOW : RED;
       const disabledTag = gDisabled > 0 ? ` ${DIM}(${gDisabled} disabled)${RESET}` : '';
-      proxyLog('POOL', undefined, `  ${DIM}├─${RESET} ${g.name} ${statusColor}(${gActive}/${gTotal} active)${RESET}${disabledTag} → ${DIM}${g.targetUrl || '(no URL)'}${RESET}`);
+      const modelTag = g.model ? ` ${DIM}[${g.model}]${RESET}` : '';
+      proxyLog('POOL', undefined, `  ${DIM}├─${RESET} ${g.name} ${statusColor}(${gActive}/${gTotal} active)${RESET}${disabledTag}${modelTag} → ${DIM}${g.targetUrl || '(no URL)'}${RESET}`);
     }
   } catch {
     // Config not loaded yet — skip

@@ -14,6 +14,7 @@ import {
   Zap,
   Activity,
   Ban,
+  ChevronDown,
 } from 'lucide-react';
 import type { AppConfigView, GroupView, KeyView, PoolStats } from '@/lib/config';
 
@@ -337,9 +338,12 @@ export default function Home() {
   const [showNewGroup, setShowNewGroup] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
   const [newGroupUrl, setNewGroupUrl] = useState('');
+  const [newGroupModel, setNewGroupModel] = useState('');
 
   const [newKeyEmail, setNewKeyEmail] = useState('');
   const [newKeyValue, setNewKeyValue] = useState('');
+  const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
+  const modelDropdownRef = useRef<HTMLDivElement>(null);
   const urlDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const pushToast = useCallback((message: string, tone: Toast['tone'] = 'default') => {
@@ -424,6 +428,35 @@ export default function Home() {
     [config, post],
   );
 
+  const availableModels = useMemo(() => {
+    if (!config) return [];
+    const models = new Set<string>();
+    for (const g of config.groups) {
+      if (g.model) models.add(g.model);
+    }
+    return Array.from(models).sort();
+  }, [config]);
+
+  const setSelectedModel = async (model: string | null) => {
+    try {
+      await post({ action: 'setModel', selectedModel: model });
+      pushToast(model ? `Model set to ${model}` : 'Model cleared');
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : 'Error', 'error');
+    }
+  };
+
+  // Close model dropdown on outside click
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (modelDropdownRef.current && !modelDropdownRef.current.contains(e.target as Node)) {
+        setModelDropdownOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, []);
+
   const selectGroup = async (groupId: string) => {
     try {
       await post({ action: 'setActiveGroup', activeGroupId: groupId });
@@ -439,12 +472,14 @@ export default function Home() {
       id: genId('group'),
       name: newGroupName.trim(),
       targetUrl: newGroupUrl.trim().replace(/\/$/, ''),
+      model: newGroupModel.trim() || undefined,
       keys: [],
     };
     try {
       await saveGroups([...config.groups, group], config.activeGroupId || group.id);
       setNewGroupName('');
       setNewGroupUrl('');
+      setNewGroupModel('');
       setShowNewGroup(false);
       pushToast(`Group "${group.name}" created`);
     } catch (err) {
@@ -498,6 +533,20 @@ export default function Home() {
     
     if (cooldownDebounce.current) clearTimeout(cooldownDebounce.current);
     cooldownDebounce.current = setTimeout(() => {
+      saveGroups(groups).catch(
+        (err) => pushToast(err instanceof Error ? err.message : 'Error', 'error'),
+      );
+    }, 600);
+  };
+
+  const modelDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const updateGroupModel = (groupId: string, model: string) => {
+    if (!config) return;
+    const groups = config.groups.map((g) => (g.id === groupId ? { ...g, model: model || undefined } : g));
+    setConfig({ ...config, groups });
+    if (modelDebounce.current) clearTimeout(modelDebounce.current);
+    modelDebounce.current = setTimeout(() => {
       saveGroups(groups).catch(
         (err) => pushToast(err instanceof Error ? err.message : 'Error', 'error'),
       );
@@ -693,6 +742,53 @@ export default function Home() {
                 {connected ? 'Connected' : 'Disconnected'}
               </span>
             </div>
+            {/* Model selector */}
+            <div ref={modelDropdownRef} className="relative">
+              <button
+                onClick={() => setModelDropdownOpen((v) => !v)}
+                className={`inline-flex items-center gap-2 h-10 px-3.5 rounded-[10px] border text-[13px] font-medium transition-colors cursor-pointer ${
+                  config?.selectedModel
+                    ? 'border-hairline bg-surface-soft text-ink hover:border-border-strong'
+                    : 'border-[color:var(--color-status-limited)] bg-[color:var(--color-status-limited-bg)] text-[color:var(--color-status-limited)]'
+                }`}
+              >
+                <span className="truncate max-w-[180px]">
+                  {config?.selectedModel || 'Select model'}
+                </span>
+                <ChevronDown className={`w-3.5 h-3.5 shrink-0 transition-transform ${modelDropdownOpen ? 'rotate-180' : ''}`} />
+              </button>
+              {modelDropdownOpen && (
+                <div className="absolute top-full right-0 mt-1.5 min-w-[220px] bg-canvas border border-hairline rounded-[10px] shadow-lg py-1.5 z-50">
+                  {availableModels.length === 0 ? (
+                    <div className="px-4 py-3 text-[13px] text-muted">
+                      No models configured. Add a model to a group first.
+                    </div>
+                  ) : (
+                    availableModels.map((m) => (
+                      <button
+                        key={m}
+                        onClick={() => {
+                          setSelectedModel(m);
+                          setModelDropdownOpen(false);
+                        }}
+                        className={`w-full text-left px-4 py-2 text-[13px] transition-colors cursor-pointer ${
+                          config?.selectedModel === m
+                            ? 'bg-surface-soft text-ink font-medium'
+                            : 'text-body hover:bg-surface-soft'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="truncate">{m}</span>
+                          {config?.selectedModel === m && (
+                            <Check className="w-3.5 h-3.5 text-[color:var(--color-status-ready)] shrink-0" />
+                          )}
+                        </div>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
             <Button variant={connected ? 'secondary' : 'primary'} onClick={toggleConnection}>
               {connected ? (
                 <>
@@ -757,6 +853,13 @@ export default function Home() {
                   required
                   {...noAutofill}
                 />
+                <TextInput
+                  placeholder="Model (e.g. claude-opus-4-8)"
+                  value={newGroupModel}
+                  onChange={(e) => setNewGroupModel(e.target.value)}
+                  mono
+                  {...noAutofill}
+                />
                 <div className="flex gap-2">
                   <Button
                     type="submit"
@@ -774,7 +877,7 @@ export default function Home() {
             )}
 
             <div className="text-[12px] text-muted px-1">
-              All keys from all groups are pooled for routing. Groups organize keys for management.
+              Only groups matching the selected model are pooled for routing.
             </div>
 
             {config && config.groups.length === 0 ? (
@@ -870,6 +973,11 @@ export default function Home() {
                           </>
                         )}
                       </div>
+                      {group.model && (
+                        <div className="ml-4 mt-0.5">
+                          <span className="text-[11px] font-mono text-muted/70 truncate block max-w-[200px]">{group.model}</span>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -907,6 +1015,15 @@ export default function Home() {
                     value={activeGroup.rateLimitCooldownHours ?? ''}
                     onChange={(e) => updateGroupCooldown(activeGroup.id, e.target.value)}
                     placeholder="Leave empty for default (uses API headers)"
+                    mono
+                    {...noAutofill}
+                  />
+
+                  <label className="text-[13px] font-medium text-muted mt-2">Model</label>
+                  <TextInput
+                    value={activeGroup.model ?? ''}
+                    onChange={(e) => updateGroupModel(activeGroup.id, e.target.value)}
+                    placeholder="e.g. claude-opus-4-8"
                     mono
                     {...noAutofill}
                   />
@@ -1012,8 +1129,9 @@ export default function Home() {
             <div className="rounded-[10px] bg-surface-soft border border-hairline p-6 flex flex-col gap-2">
               <h3 className="text-[16px] font-medium text-ink">Connecting Claude Code</h3>
               <p className="text-[14px] text-body">
-                <span className="text-ink font-medium">Connect</span> syncs your Claude CLI
-                settings.json automatically to route through this proxy. Click{' '}
+                <span className="text-ink font-medium">Select a model</span> from the header dropdown, then click{' '}
+                <span className="text-ink font-medium">Connect</span> to sync your Claude CLI
+                settings.json automatically. Click{' '}
                 <span className="text-ink font-medium">Disconnect</span> to restore it.
               </p>
               <p className="text-[14px] text-body">
@@ -1024,8 +1142,8 @@ export default function Home() {
                 .
               </p>
               <p className="text-[14px] text-body mt-1">
-                <span className="text-ink font-medium">Routing:</span> All keys from all groups are pooled
-                and load-balanced via true round-robin. Each key uses its group&apos;s upstream URL and cooldown settings.
+                <span className="text-ink font-medium">Routing:</span> Only groups matching the selected model are used.
+                Keys from matching groups are pooled and load-balanced via true round-robin.
               </p>
             </div>
           </section>

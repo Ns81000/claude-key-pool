@@ -158,10 +158,12 @@ export interface FlatPoolEntry {
 }
 
 // Build a flat array of all keys across all groups, preserving group context.
-export function buildFlatPool(config: AppConfig): FlatPoolEntry[] {
+// When selectedModel is provided, only groups whose model matches are included.
+export function buildFlatPool(config: AppConfig, selectedModel?: string | null): FlatPoolEntry[] {
   const pool: FlatPoolEntry[] = [];
   for (const group of config.groups) {
     if (group.disabled) continue;
+    if (selectedModel && group.model !== selectedModel) continue;
     for (const key of group.keys) {
       if (key.disabled) continue;
       pool.push({ group, key });
@@ -176,8 +178,8 @@ export function buildFlatPool(config: AppConfig): FlatPoolEntry[] {
 // - Deprioritizes keys that recently timed out (slow-key awareness).
 // - Skips rate-limited and invalid keys.
 // Returns null when all keys are exhausted.
-export function getNextCandidate(config: AppConfig): { group: GroupConfig; key: KeyConfig } | null {
-  const pool = buildFlatPool(config);
+export function getNextCandidate(config: AppConfig, selectedModel?: string | null): { group: GroupConfig; key: KeyConfig } | null {
+  const pool = buildFlatPool(config, selectedModel);
   if (pool.length === 0) return null;
 
   const startIndex = (proxyState.roundRobinIndex + 1) % pool.length;

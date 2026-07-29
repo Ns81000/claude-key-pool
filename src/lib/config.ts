@@ -17,12 +17,14 @@ export interface GroupConfig {
   name: string;
   targetUrl: string;
   keys: KeyConfig[];
+  model?: string;
   rateLimitCooldownHours?: number;
   disabled?: boolean;
 }
 
 export interface AppConfig {
   activeGroupId: string | null;
+  selectedModel: string | null;
   groups: GroupConfig[];
   isConnected: boolean;
   backupSettings: string | null;
@@ -62,6 +64,7 @@ const CLAUDE_SETTINGS_PATH =
 
 const DEFAULT_CONFIG: AppConfig = {
   activeGroupId: null,
+  selectedModel: null,
   groups: [],
   isConnected: false,
   backupSettings: null,
@@ -113,6 +116,7 @@ function readConfigFromDisk(): AppConfig {
         id: String(g.id),
         name: String(g.name ?? 'Untitled'),
         targetUrl: String(g.targetUrl ?? ''),
+        model: typeof g.model === 'string' && g.model ? g.model : undefined,
         rateLimitCooldownHours: typeof g.rateLimitCooldownHours === 'number' ? g.rateLimitCooldownHours : undefined,
         disabled: g.disabled === true ? true : undefined,
         keys: (g.keys || []).map((k: any) => ({
@@ -124,6 +128,7 @@ function readConfigFromDisk(): AppConfig {
       }));
       return {
         activeGroupId: parsed.activeGroupId ?? null,
+        selectedModel: typeof parsed.selectedModel === 'string' ? parsed.selectedModel : null,
         groups,
         isConnected: parsed.isConnected ?? false,
         backupSettings: parsed.backupSettings ?? null,
@@ -329,16 +334,19 @@ export function connectToClaude(config: AppConfig): AppConfig {
 
   if (!settingsJson.env) settingsJson.env = {};
   if ('apiKeyHelper' in settingsJson) delete settingsJson.apiKeyHelper;
+  if ('ANTHROPIC_AUTH_TOKEN' in settingsJson.env) delete settingsJson.env.ANTHROPIC_AUTH_TOKEN;
 
   settingsJson.env.ANTHROPIC_BASE_URL = 'http://localhost:9999';
   settingsJson.env.ANTHROPIC_API_KEY = 'sk-ant-dummy-rotated-by-key-pool-proxy-9999';
   settingsJson.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
-  settingsJson.env.ANTHROPIC_DEFAULT_OPUS_MODEL = 'claude-opus-4-8';
-  settingsJson.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'claude-opus-4-8';
-  settingsJson.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'claude-opus-4-8';
-  settingsJson.env.ANTHROPIC_DEFAULT_FABLE_MODEL = 'claude-opus-4-8';
+  const modelName = config.selectedModel || 'claude-opus-4-8';
+  settingsJson.env.ANTHROPIC_DEFAULT_OPUS_MODEL = modelName;
+  settingsJson.env.ANTHROPIC_DEFAULT_SONNET_MODEL = modelName;
+  settingsJson.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = modelName;
+  settingsJson.env.ANTHROPIC_DEFAULT_FABLE_MODEL = modelName;
   settingsJson.env.CLAUDE_CODE_EFFORT_LEVEL = 'high';
   settingsJson.effortLevel = 'high';
+  settingsJson.model = modelName;
 
   const tmp = CLAUDE_SETTINGS_PATH + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(settingsJson, null, 2), 'utf-8');
