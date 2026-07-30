@@ -209,6 +209,14 @@ export function markInvalid(keyId: string): void {
   st.cooldownUntil = Date.now() + INVALID_COOLDOWN_MS;
 }
 
+export function resetKeysStatus(keyIds: string[]): void {
+  for (const id of keyIds) {
+    const st = getKeyState(id);
+    st.status = 'active';
+    st.cooldownUntil = null;
+  }
+}
+
 export function markProviderError(keyId: string): void {
   const st = getKeyState(keyId);
   st.status = 'rate-limited';

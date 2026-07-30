@@ -7,6 +7,7 @@ import {
   buildConfigView,
   AppConfig,
   GroupConfig,
+  resetKeysStatus,
 } from '@/lib/config';
 
 export const dynamic = 'force-dynamic';
@@ -69,6 +70,15 @@ export async function POST(req: NextRequest) {
       // expanded in the UI. No longer affects proxy routing (flat pool).
       current = { ...current, activeGroupId: activeGroupId ?? null };
       await saveConfig(current);
+      return NextResponse.json(buildConfigView(current));
+    }
+
+    if (action === 'resetGroupRateLimit') {
+      const { groupId } = body;
+      const group = current.groups.find(g => g.id === groupId);
+      if (group) {
+        resetKeysStatus(group.keys.map(k => k.id));
+      }
       return NextResponse.json(buildConfigView(current));
     }
 

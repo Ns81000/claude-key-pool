@@ -465,6 +465,15 @@ export default function Home() {
     }
   };
 
+  const resetGroupRateLimit = async (groupId: string) => {
+    try {
+      await post({ action: 'resetGroupRateLimit', groupId });
+      pushToast('Rate limit reset for group');
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : 'Error', 'error');
+    }
+  };
+
   const createGroup = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!config || !newGroupName.trim() || !newGroupUrl.trim()) return;
@@ -991,9 +1000,14 @@ export default function Home() {
               <>
                 <div className="flex flex-col gap-3">
                   <div className="flex items-baseline justify-between gap-4">
-                    <h1 className="text-[32px] leading-tight font-normal text-ink tracking-tight">
-                      {activeGroup.name}
-                    </h1>
+                    <div className="flex items-center gap-4">
+                      <h1 className="text-[32px] leading-tight font-normal text-ink tracking-tight">
+                        {activeGroup.name}
+                      </h1>
+                      <Button variant="secondary" className="h-8 px-3 text-[12px]" onClick={() => resetGroupRateLimit(activeGroup.id)}>
+                        Reset Rate Limit
+                      </Button>
+                    </div>
                     <span className="text-[14px] text-muted shrink-0">
                       {activeGroup.keys.length} key{activeGroup.keys.length === 1 ? '' : 's'}
                     </span>
