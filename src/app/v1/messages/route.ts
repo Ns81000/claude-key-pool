@@ -18,6 +18,7 @@ import {
   computeCooldownUntil,
   limitKeyFromHeaders,
   peekStreamForLimit,
+  validateNonStreamingResponseBody,
   getNextCandidate,
   buildFlatPool,
 } from '@/lib/proxy';
@@ -225,6 +226,14 @@ export async function POST(req: NextRequest) {
         continue;
       }
 
+      if (peek.malformed) {
+        markProviderError(key.id);
+        decrementInFlight(key.id);
+        logRotation(reqId, key.email, `200 OK but ${peek.reason || 'malformed stream'} → provider error (rotating key)`);
+        totalTransientFailures++;
+        continue;
+      }
+
       logRequestComplete(reqId, key.email, Date.now() - startTime);
       proxyLog('SUCCESS', key.email, `#${reqId} Streaming response to client...`);
 
@@ -243,6 +252,29 @@ export async function POST(req: NextRequest) {
 
     // Non-streaming success.
     const textBody = await upstream.text();
+    const validation = validateNonStreamingResponseBody(textBody);
+    if (!validation.valid) {
+      markProviderError(key.id);
+      decrementInFlight(key.id);
+      logRotation(reqId, key.email, `200 OK but ${validation.reason} → provider error (rotating key)`);
+      totalTransientFailures++;
+      continue;
+    }
+
+    if (classifyInvalidPayload(validation.payload)) {
+      markInvalid(key.id);
+      decrementInFlight(key.id);
+      logRotation(reqId, key.email, `200 OK with key invalid error in payload → key invalid`);
+      continue;
+    }
+
+    if (classifyErrorPayload(validation.payload)) {
+      limitKeyFromHeaders(key.id, upstream.headers, group);
+      decrementInFlight(key.id);
+      logRotation(reqId, key.email, `200 OK with rate limit error in payload → rate limited`);
+      continue;
+    }
+
     decrementInFlight(key.id);
     logRequestComplete(reqId, key.email, Date.now() - startTime);
     return new Response(textBody, {

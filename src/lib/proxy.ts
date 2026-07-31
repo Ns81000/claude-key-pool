@@ -289,11 +289,50 @@ export function buildResponseHeaders(upstream: Response, isStream: boolean): Hea
   return headers;
 }
 
+export function isHtmlOrMalformedText(text: string): boolean {
+  if (!text) return true;
+  const trimmed = text.trim();
+  if (trimmed === '') return true;
+  const lower = trimmed.toLowerCase();
+  if (
+    trimmed.startsWith('<') ||
+    lower.startsWith('<!doctype html') ||
+    lower.startsWith('<html') ||
+    lower.includes('<head>') ||
+    lower.includes('<body>')
+  ) {
+    return true;
+  }
+  return false;
+}
+
+export function validateNonStreamingResponseBody(text: string): {
+  valid: boolean;
+  reason?: string;
+  payload?: unknown;
+} {
+  if (!text || text.trim() === '') {
+    return { valid: false, reason: 'empty response body (0 bytes)' };
+  }
+  if (isHtmlOrMalformedText(text)) {
+    return { valid: false, reason: 'HTML response (gateway/proxy challenge)' };
+  }
+  try {
+    const payload = JSON.parse(text);
+    return { valid: true, payload };
+  } catch {
+    return { valid: false, reason: 'malformed JSON response' };
+  }
+}
+
 export interface StreamPeekResult {
   // A limit error was detected before any assistant content reached the client.
   limited: boolean;
+  // An HTML challenge or empty response was detected on HTTP 200 before content.
+  malformed?: boolean;
+  reason?: string;
   // The full stream to forward to the client (buffered head re-prepended),
-  // or null when limited (caller should retry with the next key instead).
+  // or null when limited/malformed (caller should retry with the next key instead).
   stream: ReadableStream<Uint8Array> | null;
 }
 
@@ -340,7 +379,7 @@ export async function peekStreamForLimit(
   upstream: Response,
 ): Promise<StreamPeekResult> {
   const body = upstream.body;
-  if (!body) return { limited: false, stream: null };
+  if (!body) return { limited: false, malformed: true, reason: 'No response body', stream: null };
 
   // Bug #4 fix: if the upstream sent a compressed response despite our
   // accept-encoding: identity header, we cannot text-decode the stream to
@@ -362,6 +401,8 @@ export async function peekStreamForLimit(
 
   let sawContent = false;
   let limited = false;
+  let malformed = false;
+  let malformedReason = '';
 
   while (bufferedBytes < STREAM_PEEK_BYTES && Date.now() < deadline) {
     let chunk;
@@ -376,6 +417,12 @@ export async function peekStreamForLimit(
       bufferedBytes += chunk.value.byteLength;
       headText += decoder.decode(chunk.value, { stream: true });
 
+      if (isHtmlOrMalformedText(headText)) {
+        malformed = true;
+        malformedReason = 'HTML response on SSE stream (gateway/proxy challenge)';
+        break;
+      }
+
       const result = detectLimitInSseText(headText);
       if (result.limited) {
         limited = true;
@@ -388,6 +435,12 @@ export async function peekStreamForLimit(
     }
   }
 
+  // Check if stream closed with 0 bytes read
+  if (bufferedBytes === 0 && !limited && !sawContent) {
+    malformed = true;
+    malformedReason = 'Empty stream response (0 bytes)';
+  }
+
   if (limited && !sawContent) {
     // Discard the buffered error; caller will retry with the next key.
     try {
@@ -396,6 +449,15 @@ export async function peekStreamForLimit(
       /* ignore */
     }
     return { limited: true, stream: null };
+  }
+
+  if (malformed && !sawContent) {
+    try {
+      await reader.cancel();
+    } catch {
+      /* ignore */
+    }
+    return { limited: false, malformed: true, reason: malformedReason, stream: null };
   }
 
   // Replay buffered head, then pipe the remainder with stall timeout.

@@ -17,6 +17,7 @@ import {
   classifyInvalidPayload,
   computeCooldownUntil,
   limitKeyFromHeaders,
+  validateNonStreamingResponseBody,
   getNextCandidate,
   buildFlatPool,
 } from '@/lib/proxy';
@@ -183,9 +184,18 @@ export async function GET(req: NextRequest) {
       });
     }
 
+    const textBody = await upstream.text();
+    const validation = validateNonStreamingResponseBody(textBody);
+    if (!validation.valid) {
+      markProviderError(key.id);
+      decrementInFlight(key.id);
+      logRotation(reqId, key.email, `200 OK but ${validation.reason} → provider error (rotating key)`);
+      totalTransientFailures++;
+      continue;
+    }
+
     decrementInFlight(key.id);
     logRequestComplete(reqId, key.email, Date.now() - startTime);
-    const textBody = await upstream.text();
     return new Response(textBody, {
       status: upstream.status,
       headers: buildResponseHeaders(upstream, false),
