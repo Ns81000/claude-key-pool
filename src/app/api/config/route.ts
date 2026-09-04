@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
   loadConfig,
-  saveConfig,
+  mutateConfig,
+  getConfigVersion,
   connectToClaude,
   disconnectFromClaude,
   buildConfigView,
@@ -52,36 +53,58 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { action, config, activeGroupId } = body;
-    let current: AppConfig = loadConfig();
 
+    // Every action below runs its read-modify-write through mutateConfig:
+    // the read, the mutation, and the write are one serialized step, so two
+    // overlapping POSTs cannot both start from the same old version and
+    // silently overwrite each other.
     if (action === 'save') {
-      if (config) {
-        current = {
-          ...current,
-          groups: sanitizeGroups(config.groups),
-          activeGroupId: config.activeGroupId ?? current.activeGroupId,
-          selectedModel: typeof config.selectedModel === 'string' ? config.selectedModel : current.selectedModel,
-          smallFastModel: typeof config.smallFastModel === 'string' && config.smallFastModel
-            ? config.smallFastModel
-            : config.smallFastModel === null ? null : current.smallFastModel,
-        };
+      // Optimistic concurrency for the one action whose payload is a full
+      // snapshot: the client echoes the configVersion it edited; a mismatch
+      // means the config changed since (another tab, or this tab's stale
+      // poll), and saving that snapshot would erase those changes — e.g. a
+      // key added in another tab. Reject with 409; the dashboard reloads.
+      if (config && typeof config.configVersion === 'number') {
+        if (config.configVersion !== getConfigVersion()) {
+          return NextResponse.json(
+            { error: 'Configuration was changed by another tab or action — reloaded, retry your edit' },
+            { status: 409 },
+          );
+        }
       }
-      await saveConfig(current);
-      if (current.isConnected) {
-        try { connectToClaude(current); } catch { /* best-effort sync */ }
-      }
+      const current = await mutateConfig((cfg: AppConfig) => {
+        if (config) {
+          cfg.groups = sanitizeGroups(config.groups);
+          cfg.activeGroupId = config.activeGroupId ?? cfg.activeGroupId;
+          if (typeof config.selectedModel === 'string') {
+            cfg.selectedModel = config.selectedModel || null;
+          }
+          // Symmetric with selectedModel: '' clears the fast model.
+          if (typeof config.smallFastModel === 'string') {
+            cfg.smallFastModel = config.smallFastModel || null;
+          } else if (config.smallFastModel === null) {
+            cfg.smallFastModel = null;
+          }
+        }
+        if (cfg.isConnected) {
+          try { connectToClaude(cfg); } catch { /* best-effort env sync */ }
+        }
+      });
       return NextResponse.json(buildConfigView(current));
     }
 
     if (action === 'setActiveGroup') {
       // Kept for dashboard display purposes — controls which group is shown
       // expanded in the UI. No longer affects proxy routing (flat pool).
-      current = { ...current, activeGroupId: activeGroupId ?? null };
-      await saveConfig(current);
+      const current = await mutateConfig((cfg) => {
+        cfg.activeGroupId = activeGroupId ?? null;
+      });
       return NextResponse.json(buildConfigView(current));
     }
 
     if (action === 'resetGroupRateLimit') {
+      // Runtime key state only — no config write needed.
+      const current = loadConfig();
       const { groupId } = body;
       const group = current.groups.find(g => g.id === groupId);
       if (group) {
@@ -91,43 +114,43 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === 'connect') {
-      current = connectToClaude(current);
-      await saveConfig(current);
+      const current = await mutateConfig((cfg) => {
+        connectToClaude(cfg); // throws before writing on failure
+      });
       return NextResponse.json(buildConfigView(current));
     }
 
     if (action === 'disconnect') {
-      current = disconnectFromClaude(current);
-      await saveConfig(current);
+      const current = await mutateConfig((cfg) => {
+        disconnectFromClaude(cfg);
+      });
       return NextResponse.json(buildConfigView(current));
     }
 
     if (action === 'setModel') {
       // Each model field is optional: the dashboard updates the main model and
-      // the small/fast model through independent dropdowns.
-      if ('selectedModel' in body) {
-        current = {
-          ...current,
-          selectedModel: typeof body.selectedModel === 'string' && body.selectedModel
+      // the small/fast model through independent dropdowns. No fields at all —
+      // nothing to change, no write.
+      const hasMain = 'selectedModel' in body;
+      const hasFast = 'smallFastModel' in body;
+      if (!hasMain && !hasFast) {
+        return NextResponse.json(buildConfigView(loadConfig()));
+      }
+      const current = await mutateConfig((cfg) => {
+        if (hasMain) {
+          cfg.selectedModel = typeof body.selectedModel === 'string' && body.selectedModel
             ? body.selectedModel
-            : null,
-        };
-      }
-      if ('smallFastModel' in body) {
-        current = {
-          ...current,
-          smallFastModel: typeof body.smallFastModel === 'string' && body.smallFastModel
+            : null;
+        }
+        if (hasFast) {
+          cfg.smallFastModel = typeof body.smallFastModel === 'string' && body.smallFastModel
             ? body.smallFastModel
-            : null,
-        };
-      }
-      await saveConfig(current);
-      if (current.isConnected) {
-        try {
-          current = connectToClaude(current);
-          await saveConfig(current);
-        } catch { /* best-effort sync */ }
-      }
+            : null;
+        }
+        if (cfg.isConnected) {
+          try { connectToClaude(cfg); } catch { /* best-effort env sync */ }
+        }
+      });
       return NextResponse.json(buildConfigView(current));
     }
 

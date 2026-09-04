@@ -111,12 +111,43 @@ export async function POST(req: NextRequest) {
   let totalCandidatesTried = 0;
   let totalTransientFailures = 0;
 
-  const flatPoolSize = buildFlatPool(config, config.selectedModel).length;
+  // Route by the model the request actually carries when the pool has a group
+  // for it: background/auto-mode requests carry smallFastModel and must reach
+  // that model's group, not the main one. Fall back to the dashboard
+  // selection for anything the pool has no group for.
+  const poolModel =
+    model !== 'unknown' && buildFlatPool(config, model).length > 0
+      ? model
+      : config.selectedModel;
+  if (poolModel !== config.selectedModel) {
+    proxyLog('INFO', undefined, `#${reqId} Pool routed by request model "${poolModel}" (differs from selected "${config.selectedModel}")`);
+  }
+
+  const flatPoolSize = buildFlatPool(config, poolModel).length;
+
+  if (flatPoolSize === 0) {
+    // Not a rate limit: no enabled group matches the model at all (all
+    // groups disabled, or the group's model was renamed). A 429 here sent
+    // operators chasing key quarantines that don't exist.
+    proxyLog('ERROR', undefined, `#${reqId} No enabled group serves model "${poolModel}"`);
+    return errorJson(
+      'invalid_request_error',
+      `No enabled group in Claude Key Pool serves model "${poolModel}". Open http://localhost:9999 and check group models / the selected model.`,
+      400,
+    );
+  }
 
   while (totalCandidatesTried < flatPoolSize) {
-    const candidate = getNextCandidate(config, config.selectedModel);
+    const candidate = getNextCandidate(config, poolModel);
     if (!candidate) {
       break;
+    }
+
+    // Client (or the /api/test probe) went away mid-rotation: stop burning
+    // keys, quota, and 5-minute cooldowns on a request nobody waits for.
+    if (req.signal.aborted) {
+      proxyLog('WARN', candidate.key.email, `#${reqId} Client aborted during rotation → stopping`);
+      return new Response('Client aborted', { status: 499 });
     }
 
     // Transient failures (5xx / network / 403) are usually upstream-wide, not

@@ -81,10 +81,26 @@ export async function GET(req: NextRequest) {
 
   const flatPoolSize = buildFlatPool(config, config.selectedModel).length;
 
+  if (flatPoolSize === 0) {
+    // Not a rate limit: no enabled group matches the selected model at all.
+    // Mirror the /v1/messages fix — an honest 400 instead of a misleading 429.
+    return NextResponse.json(
+      { error: `No enabled group in Claude Key Pool serves model "${config.selectedModel}". Open http://localhost:9999 and check group models / the selected model.` },
+      { status: 400 },
+    );
+  }
+
   while (totalCandidatesTried < flatPoolSize) {
     const candidate = getNextCandidate(config, config.selectedModel);
     if (!candidate) {
       break;
+    }
+
+    // Client went away mid-rotation: stop burning keys on a request nobody
+    // waits for.
+    if (req.signal.aborted) {
+      proxyLog('WARN', candidate.key.email, `#${reqId} Client aborted during rotation → stopping`);
+      return new Response('Client aborted', { status: 499 });
     }
 
     // Same transient cap as /v1/messages: transient failures are usually

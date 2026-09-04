@@ -46,6 +46,10 @@ export interface GroupView extends Omit<GroupConfig, 'keys'> {
 export interface AppConfigView extends Omit<AppConfig, 'groups'> {
   groups: GroupView[];
   poolStats: PoolStats;
+  // Monotonic version bumped on every dashboard write. The client echoes it
+  // back on `save` so the server can reject a full-snapshot save made from a
+  // stale state (409) instead of silently erasing another tab's changes.
+  configVersion: number;
 }
 
 export interface PoolStats {
@@ -328,6 +332,7 @@ export function buildConfigView(config: AppConfig): AppConfigView {
     ...config,
     groups,
     poolStats: { totalKeys, activeKeys, rateLimitedKeys, invalidKeys, disabledKeys, totalInFlight },
+    configVersion: proxyState.configVersion,
   };
 }
 
@@ -365,6 +370,40 @@ export function saveConfig(config: AppConfig): Promise<void> {
   // Keep the chain alive even if one write throws.
   proxyState.writeChain = run.catch(() => {});
   return run;
+}
+
+// Serialized read-modify-write for dashboard actions. saveConfig alone only
+// serializes the write: two overlapping POSTs could both read the same old
+// version, then the second write silently erased the first (observed with
+// two dashboard tabs). Here the read, the mutation, and the write all run
+// inside the chain as one step. `mutate` edits the config in place; a throw
+// propagates to the caller without writing, and the chain survives.
+export function mutateConfig(mutate: (config: AppConfig) => void): Promise<AppConfig> {
+  const run = proxyState.writeChain.then(() => {
+    const config = loadConfig();
+    mutate(config);
+    writeConfigAtomic(config);
+    proxyState.configCache = config;
+    proxyState.configVersion += 1;
+    proxyState.cachedVersion = proxyState.configVersion;
+    try {
+      proxyState.configMtimeMs = fs.statSync(CONFIG_FILE_PATH).mtimeMs;
+    } catch {
+      proxyState.configMtimeMs = 0;
+    }
+    return config;
+  });
+  proxyState.writeChain = run.then(
+    () => {},
+    () => {},
+  );
+  return run;
+}
+
+// Current dashboard-write version — `save` compares the client's echoed
+// version against this to detect stale snapshots.
+export function getConfigVersion(): number {
+  return proxyState.configVersion;
 }
 
 // Claude CLI integration -----------------------------------------------------
@@ -427,7 +466,11 @@ export function disconnectFromClaude(config: AppConfig): AppConfig {
   } else {
     // Bug #7 fix: fallback to official Anthropic API, not a third-party domain.
     const content = fs.readFileSync(CLAUDE_SETTINGS_PATH, 'utf-8');
-    const settingsJson = JSON.parse(content) as { env?: Record<string, string> };
+    const settingsJson = JSON.parse(content) as {
+      env?: Record<string, string>;
+      model?: unknown;
+      effortLevel?: unknown;
+    };
     if (settingsJson.env) {
       settingsJson.env.ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
       // Strip the pool's dummy key and model overrides: leaving them would
@@ -445,6 +488,12 @@ export function disconnectFromClaude(config: AppConfig): AppConfig {
         delete settingsJson.env[name];
       }
     }
+    // connectToClaude also wrote top-level `model`/`effortLevel`. Without the
+    // backup their originals are unknown, and the pool-written values (a
+    // relay-only model name like glm-5.3) break every new session against
+    // api.anthropic.com — remove them and let the CLI defaults apply.
+    delete settingsJson.model;
+    delete settingsJson.effortLevel;
     fs.writeFileSync(tmp, JSON.stringify(settingsJson, null, 2), 'utf-8');
     fs.renameSync(tmp, CLAUDE_SETTINGS_PATH);
   }

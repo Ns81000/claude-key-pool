@@ -11,9 +11,21 @@ export const dynamic = 'force-dynamic';
 // even tried. Looping back to our own /v1/messages exercises the full path
 // (pool selection, key injection, upstream, rotation) exactly as Claude Code
 // would see it.
+// One probe at a time: parallel Test clicks (a second tab, a page reload)
+// would each spend real upstream quota and, on a 429, quarantine a live key.
+// Module-level on purpose — the server process is single-instance.
+let probeInFlight = false;
+
 export async function POST(req: NextRequest) {
   const rejected = rejectCrossSiteRequest(req);
   if (rejected) return rejected;
+
+  if (probeInFlight) {
+    return NextResponse.json(
+      { ok: false, error: 'A test probe is already in progress — wait for it to finish' },
+      { status: 409 },
+    );
+  }
 
   const config = loadConfig();
   if (!config.selectedModel) {
@@ -23,12 +35,22 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const port = process.env.PORT || 9999;
+  // Probe our own /v1/messages through the origin the dashboard reached us
+  // on — the listener's real port. process.env.PORT is the wrong source
+  // here: `next start -p 9999` overrides it, so an exported PORT would send
+  // the probe to a wrong (or someone else's) local service.
+  const origin = new URL(req.url).origin;
   const controller = new AbortController();
+  // If the dashboard tab goes away, abort the probe: without this the
+  // rotation behind /v1/messages keeps cycling keys and quarantines long
+  // after the client stopped waiting.
+  const onClientAbort = () => controller.abort();
+  req.signal.addEventListener('abort', onClientAbort, { once: true });
   const timer = setTimeout(() => controller.abort(), 120_000);
+  probeInFlight = true;
   const started = Date.now();
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+    const res = await fetch(`${origin}/v1/messages`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -72,12 +94,16 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     const message =
       err instanceof Error && err.name === 'AbortError'
-        ? 'Probe timed out after 120s'
+        ? req.signal.aborted
+          ? 'Probe aborted (dashboard tab closed)'
+          : 'Probe timed out after 120s'
         : err instanceof Error
           ? err.message
           : 'Probe failed';
     return NextResponse.json({ ok: false, error: message });
   } finally {
+    probeInFlight = false;
     clearTimeout(timer);
+    req.signal.removeEventListener('abort', onClientAbort);
   }
 }

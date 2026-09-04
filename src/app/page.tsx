@@ -409,22 +409,32 @@ export default function Home() {
         body: JSON.stringify(payload),
       });
       const data = await res.json();
+      if (res.status === 409) {
+        // Our snapshot went stale (another tab changed the config) — refresh
+        // to the server state; the caller's catch shows the toast.
+        await fetchConfig();
+        throw new Error('Config was changed by another tab — reloaded, retry your edit');
+      }
       if (!res.ok) throw new Error(data.error || 'Request failed');
       setConfig(data);
       return data;
     },
-    [],
+    [fetchConfig],
   );
 
   const saveGroups = useCallback(
     async (groups: GroupView[], activeGroupId?: string | null) => {
       const cfg = config;
       if (!cfg) return;
+      // Echo the version of the snapshot we edited — the server rejects a
+      // save from a stale state (409) instead of silently erasing another
+      // tab's changes (e.g. a key added there).
       await post({
         action: 'save',
         config: {
           groups,
           activeGroupId: activeGroupId === undefined ? cfg.activeGroupId : activeGroupId,
+          configVersion: cfg.configVersion,
         },
       });
     },
@@ -434,8 +444,10 @@ export default function Home() {
   const availableModels = useMemo(() => {
     if (!config) return [];
     const models = new Set<string>();
+    // Disabled groups are not in the rotation — offering their models in the
+    // dropdowns (main or fast) selects a model nobody can serve.
     for (const g of config.groups) {
-      if (g.model) models.add(g.model);
+      if (!g.disabled && g.model) models.add(g.model);
     }
     return Array.from(models).sort();
   }, [config]);

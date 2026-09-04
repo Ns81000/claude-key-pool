@@ -602,11 +602,22 @@ export async function classifyUpstreamFailure(upstream: Response): Promise<Upstr
 }
 
 // Inspect a 401. Some relays (agentrouter.org) reject the *client*, not the
-// key, when the request does not look like a Claude CLI request:
+// key, when the request does not look like an approved CLI client:
 // {"error":{"message":"unauthorized client detected, contact support..."}}.
 // Rotating keys on that answer is wrong twice over: every key would fail
 // identically, and a plain curl health-check would poison the whole pool with
-// 1-hour invalid marks. Distinguish it and forward the 401 to the client.
+// 1-hour invalid marks. The exact wording differs per upstream, so a list of
+// client-rejection markers decides; anything else is an ordinary auth failure.
+const CLIENT_REJECTED_401_PATTERNS: RegExp[] = [
+  /unauthorized client/i, // agentrouter.org
+  /unsupported client/i,
+  /blocked client/i,
+  /client (?:is )?(?:not|no) (?:allowed|authorized|permitted)/i,
+  /client (?:rejected|forbidden|mismatch)/i,
+  // A 401 that names the User-Agent is about the client by construction.
+  /user[- ]agent/i,
+];
+
 export type Unauthorized401 =
   | { kind: 'client-rejected'; payload: unknown } // the client, not the key
   | { kind: 'key-invalid' }; // ordinary auth failure
@@ -620,7 +631,7 @@ export async function classify401(upstream: Response): Promise<Unauthorized401> 
   }
   const err = payload as { error?: { message?: string } | string; message?: string } | null;
   const message = typeof err?.error === 'string' ? err.error : err?.error?.message ?? err?.message ?? '';
-  if (/unauthorized client detected/i.test(String(message))) {
+  if (CLIENT_REJECTED_401_PATTERNS.some((re) => re.test(String(message)))) {
     return { kind: 'client-rejected', payload };
   }
   return { kind: 'key-invalid' };
