@@ -253,6 +253,19 @@ export function getNextCandidate(config: AppConfig, selectedModel?: string | nul
 // proxy_ai (port 8318) plays with codex_cli_rs for Kilo Code.
 const MASK_USER_AGENT = 'claude-cli/2.0.0 (external, cli)';
 
+// After an IP-level 429, pause ALL upstream traffic for this long. Every key
+// in the pool leaves from the same machine IP, so rotating on an IP-level
+// limit fires a burst of requests at an upstream that just rate-limited that
+// IP — the escalation pattern that ends in a ban. The client retries with its
+// own backoff; the pause lapses on its own.
+export const IP_PAUSE_MS = 30_000;
+
+// Never burn more than this many keys on transient failures (5xx / network /
+// 403) within a single client request. Those failures are usually upstream-
+// wide, not key-specific: rotating through the whole pool both fires a burst
+// at a struggling upstream and quarantines every key for 5 minutes.
+export const MAX_TRANSIENT_ROTATIONS = 3;
+
 // Build the upstream request headers: copy client headers minus hop-by-hop and
 // auth, inject the pool key.
 export function buildUpstreamHeaders(clientHeaders: Headers, apiKey: string): Headers {
@@ -548,20 +561,24 @@ export function limitKeyFromHeaders(keyId: string, headers: Headers, group?: Gro
 // the two routes used to carry ~200 duplicated lines of this logic).
 // ---------------------------------------------------------------------------
 
-// Inspect a 429: key-level (cool it down), key-invalid, or IP-level (rotate
-// without punishing the current key).
-export type RateLimit429Kind = 'invalid' | 'key-limited' | 'ip-level';
+// Inspect a 429: key-level (cool it down), key-invalid, or IP-level (all keys
+// share the machine's IP — the caller pauses the pool and returns the error
+// instead of rotating). The payload rides along so the caller can forward it.
+export type RateLimit429 =
+  | { kind: 'invalid'; payload: unknown }
+  | { kind: 'key-limited'; payload: unknown }
+  | { kind: 'ip-level'; payload: unknown };
 
-export async function classify429(upstream: Response): Promise<RateLimit429Kind> {
+export async function classify429(upstream: Response): Promise<RateLimit429> {
   let payload: unknown = null;
   try {
     payload = await upstream.json();
   } catch {
     /* ignore */
   }
-  if (classifyInvalidPayload(payload)) return 'invalid';
-  if (classifyErrorPayload(payload)) return 'key-limited';
-  return 'ip-level';
+  if (classifyInvalidPayload(payload)) return { kind: 'invalid', payload };
+  if (classifyErrorPayload(payload)) return { kind: 'key-limited', payload };
+  return { kind: 'ip-level', payload };
 }
 
 // Inspect a non-OK (non-429/401/403) response: what should the rotation do?

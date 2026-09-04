@@ -84,6 +84,10 @@ export interface RuntimeKeyState {
 interface GlobalProxyState {
   keys: Record<string, RuntimeKeyState>; // keyId -> state
   roundRobinIndex: number; // flat-pool round-robin pointer
+  // Pool-wide upstream pause after an IP-level 429 (ms epoch). All keys share
+  // this machine's IP, so a 429 that is not key-specific throttles every key
+  // at once — while paused, /v1/* fails fast instead of sending anything up.
+  upstreamPausedUntil: number;
   // Cached parsed config + invalidation metadata
   configCache: AppConfig | null;
   configMtimeMs: number;
@@ -98,6 +102,7 @@ if (!globalForProxy.proxyState) {
   globalForProxy.proxyState = {
     keys: {},
     roundRobinIndex: -1,
+    upstreamPausedUntil: 0,
     configCache: null,
     configMtimeMs: 0,
     configVersion: 0,
@@ -107,6 +112,21 @@ if (!globalForProxy.proxyState) {
   };
 }
 export const proxyState = globalForProxy.proxyState;
+
+// Pause all upstream traffic for the given duration (extends an active pause).
+// Used after an IP-level rate limit: rotating keys cannot help — every key
+// leaves from the same IP — and firing the rest of the pool at an already
+// throttled upstream is the escalation pattern that ends in a ban.
+export function pauseUpstream(ms: number): void {
+  proxyState.upstreamPausedUntil = Math.max(
+    proxyState.upstreamPausedUntil,
+    Date.now() + ms,
+  );
+}
+
+export function getUpstreamPauseRemainingMs(): number {
+  return Math.max(0, proxyState.upstreamPausedUntil - Date.now());
+}
 
 function parseConfig(text: string): AppConfig {
   const parsed = JSON.parse(text) as Partial<AppConfig> & {

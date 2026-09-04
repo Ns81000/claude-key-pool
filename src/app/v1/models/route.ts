@@ -8,9 +8,13 @@ import {
   incrementInFlight,
   decrementInFlight,
   getKeyState,
+  pauseUpstream,
+  getUpstreamPauseRemainingMs,
 } from '@/lib/config';
 import {
   CONNECT_TIMEOUT_MS,
+  IP_PAUSE_MS,
+  MAX_TRANSIENT_ROTATIONS,
   buildResponseHeaders,
   buildUpstreamHeaders,
   classify429,
@@ -56,6 +60,19 @@ export async function GET(req: NextRequest) {
     );
   }
 
+  // Pool-wide upstream pause (set after an IP-level 429) — fail fast, same as
+  // /v1/messages.
+  const pauseRemainingMs = getUpstreamPauseRemainingMs();
+  if (pauseRemainingMs > 0) {
+    return NextResponse.json(
+      { error: `Upstream is rate-limited at the IP level; the pool paused for ${Math.ceil(pauseRemainingMs / 1000)}s.` },
+      {
+        status: 429,
+        headers: { 'retry-after': String(Math.ceil(pauseRemainingMs / 1000)) },
+      },
+    );
+  }
+
   logSeparator();
   logRequestStart(reqId, 'GET', `/v1/models`);
 
@@ -67,6 +84,13 @@ export async function GET(req: NextRequest) {
   while (totalCandidatesTried < flatPoolSize) {
     const candidate = getNextCandidate(config, config.selectedModel);
     if (!candidate) {
+      break;
+    }
+
+    // Same transient cap as /v1/messages: transient failures are usually
+    // upstream-wide; stop burning keys after a few.
+    if (totalTransientFailures >= MAX_TRANSIENT_ROTATIONS) {
+      logRotation(reqId, candidate.key.email, `Stopping rotation after ${totalTransientFailures} transient failures (cap ${MAX_TRANSIENT_ROTATIONS}) — upstream looks unhealthy`);
       break;
     }
 
@@ -122,18 +146,28 @@ export async function GET(req: NextRequest) {
     clearTimeout(timer);
 
     if (upstream.status === 429) {
-      const kind = await classify429(upstream);
-      if (kind === 'invalid') {
+      const verdict = await classify429(upstream);
+      if (verdict.kind === 'invalid') {
         markInvalid(key.id);
+        decrementInFlight(key.id);
         logRotation(reqId, key.email, `429 → key invalid/revoked`);
-      } else if (kind === 'key-limited') {
-        limitKeyFromHeaders(key.id, upstream.headers, group);
-        logRotation(reqId, key.email, `429 → rate limited (key cooled down)`);
-      } else {
-        logRotation(reqId, key.email, `429 → IP-level rate limit (key NOT cooled down)`);
+        continue;
       }
+      if (verdict.kind === 'key-limited') {
+        limitKeyFromHeaders(key.id, upstream.headers, group);
+        decrementInFlight(key.id);
+        logRotation(reqId, key.email, `429 → rate limited (key cooled down)`);
+        continue;
+      }
+      // IP-level — same as /v1/messages: pause the pool, return the error
+      // instead of rotating (every key shares this machine's IP).
+      pauseUpstream(IP_PAUSE_MS);
       decrementInFlight(key.id);
-      continue;
+      logRotation(reqId, key.email, `429 → IP-level rate limit → pool paused ${IP_PAUSE_MS / 1000}s, error returned to client (key NOT cooled down)`);
+      return NextResponse.json(verdict.payload ?? { error: 'Upstream IP-level rate limit' }, {
+        status: 429,
+        headers: { 'retry-after': String(IP_PAUSE_MS / 1000) },
+      });
     }
 
     if (upstream.status === 401) {

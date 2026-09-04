@@ -8,9 +8,13 @@ import {
   incrementInFlight,
   decrementInFlight,
   getKeyState,
+  pauseUpstream,
+  getUpstreamPauseRemainingMs,
 } from '@/lib/config';
 import {
   CONNECT_TIMEOUT_MS,
+  IP_PAUSE_MS,
+  MAX_TRANSIENT_ROTATIONS,
   buildResponseHeaders,
   buildUpstreamHeaders,
   classify429,
@@ -67,6 +71,26 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Pool-wide upstream pause (set after an IP-level 429). Sending more
+  // requests from the same IP would only escalate; fail fast with retry-after
+  // so the client backs off too.
+  const pauseRemainingMs = getUpstreamPauseRemainingMs();
+  if (pauseRemainingMs > 0) {
+    proxyLog('WARN', undefined, `#${reqId} Upstream paused after IP-level rate limit (${Math.ceil(pauseRemainingMs / 1000)}s left) → failing fast`);
+    return NextResponse.json(
+      {
+        error: {
+          type: 'rate_limit_error',
+          message: `Upstream is rate-limited at the IP level; the pool paused for ${Math.ceil(pauseRemainingMs / 1000)}s. Retry after the pause.`,
+        },
+      },
+      {
+        status: 429,
+        headers: { 'retry-after': String(Math.ceil(pauseRemainingMs / 1000)) },
+      },
+    );
+  }
+
   // Read the raw body once. We must inspect `stream`, so parse a copy but forward
   // the original bytes to avoid re-serializing large payloads.
   const rawBody = await req.arrayBuffer();
@@ -92,6 +116,15 @@ export async function POST(req: NextRequest) {
   while (totalCandidatesTried < flatPoolSize) {
     const candidate = getNextCandidate(config, config.selectedModel);
     if (!candidate) {
+      break;
+    }
+
+    // Transient failures (5xx / network / 403) are usually upstream-wide, not
+    // key-specific. After a few, stop burning keys: each rotation fires
+    // another request at the struggling upstream and quarantines a key for
+    // 5 minutes.
+    if (totalTransientFailures >= MAX_TRANSIENT_ROTATIONS) {
+      logRotation(reqId, candidate.key.email, `Stopping rotation after ${totalTransientFailures} transient failures (cap ${MAX_TRANSIENT_ROTATIONS}) — upstream looks unhealthy`);
       break;
     }
 
@@ -150,18 +183,31 @@ export async function POST(req: NextRequest) {
 
     // 429 → limited, honor retry-after, rotate.
     if (upstream.status === 429) {
-      const kind = await classify429(upstream);
-      if (kind === 'invalid') {
+      const verdict = await classify429(upstream);
+      if (verdict.kind === 'invalid') {
         markInvalid(key.id);
+        decrementInFlight(key.id);
         logRotation(reqId, key.email, `429 → key invalid/revoked`);
-      } else if (kind === 'key-limited') {
-        limitKeyFromHeaders(key.id, upstream.headers, group);
-        logRotation(reqId, key.email, `429 → rate limited (key cooled down)`);
-      } else {
-        logRotation(reqId, key.email, `429 → IP-level rate limit (key NOT cooled down)`);
+        continue;
       }
+      if (verdict.kind === 'key-limited') {
+        limitKeyFromHeaders(key.id, upstream.headers, group);
+        decrementInFlight(key.id);
+        logRotation(reqId, key.email, `429 → rate limited (key cooled down)`);
+        continue;
+      }
+      // IP-level: every key leaves from the same IP, so rotating would fire a
+      // burst of requests at an upstream that just rate-limited this IP — the
+      // escalation pattern that ends in a ban. Pause the pool, let the current
+      // key off (this 429 is not its fault), and return the error so the
+      // client retries with its own backoff.
+      pauseUpstream(IP_PAUSE_MS);
       decrementInFlight(key.id);
-      continue;
+      logRotation(reqId, key.email, `429 → IP-level rate limit → pool paused ${IP_PAUSE_MS / 1000}s, error returned to client (key NOT cooled down)`);
+      return NextResponse.json(verdict.payload ?? { error: { type: 'rate_limit_error', message: 'Upstream IP-level rate limit' } }, {
+        status: 429,
+        headers: { ...Object.fromEntries(buildResponseHeaders(upstream, false).entries()), 'retry-after': String(IP_PAUSE_MS / 1000) },
+      });
     }
 
     // 401 → auth failure. Unless the upstream rejected the *client* (not the
