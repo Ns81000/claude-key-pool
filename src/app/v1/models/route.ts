@@ -13,9 +13,12 @@ import {
   CONNECT_TIMEOUT_MS,
   buildResponseHeaders,
   buildUpstreamHeaders,
-  classifyErrorPayload,
-  classifyInvalidPayload,
+  classify429,
+  classify401,
+  classifyUpstreamFailure,
   computeCooldownUntil,
+  fetchErrorCode,
+  isGroupLevelNetworkError,
   limitKeyFromHeaders,
   validateNonStreamingResponseBody,
   getNextCandidate,
@@ -102,10 +105,13 @@ export async function GET(req: NextRequest) {
         return new Response('Client aborted', { status: 499 });
       }
 
-      const isTimeout = err && (err as any).name === 'AbortError';
+      const isTimeout = err && (err as { name?: string }).name === 'AbortError';
       if (isTimeout) {
         markKeySlow(key.id);
         logRotation(reqId, key.email, `Models fetch timed out (${CONNECT_TIMEOUT_MS / 1000}s) → marked slow`);
+      } else if (isGroupLevelNetworkError(err)) {
+        markProviderError(key.id);
+        logRotation(reqId, key.email, `Network failure (${fetchErrorCode(err)}) — group URL unreachable → 5-min cooldown`);
       } else {
         markKeySlow(key.id);
         logRotation(reqId, key.email, `Models fetch failed: ${err instanceof Error ? err.message : String(err)} → marked slow`);
@@ -116,17 +122,11 @@ export async function GET(req: NextRequest) {
     clearTimeout(timer);
 
     if (upstream.status === 429) {
-      let payload: unknown = null;
-      try {
-        payload = await upstream.json();
-      } catch {
-        /* ignore */
-      }
-
-      if (classifyInvalidPayload(payload)) {
+      const kind = await classify429(upstream);
+      if (kind === 'invalid') {
         markInvalid(key.id);
         logRotation(reqId, key.email, `429 → key invalid/revoked`);
-      } else if (classifyErrorPayload(payload)) {
+      } else if (kind === 'key-limited') {
         limitKeyFromHeaders(key.id, upstream.headers, group);
         logRotation(reqId, key.email, `429 → rate limited (key cooled down)`);
       } else {
@@ -137,6 +137,15 @@ export async function GET(req: NextRequest) {
     }
 
     if (upstream.status === 401) {
+      const verdict = await classify401(upstream);
+      if (verdict.kind === 'client-rejected') {
+        decrementInFlight(key.id);
+        logRotation(reqId, key.email, `401 → upstream rejected this client (key NOT marked invalid)`);
+        return NextResponse.json(verdict.payload, {
+          status: 401,
+          headers: buildResponseHeaders(upstream, false),
+        });
+      }
       markInvalid(key.id);
       decrementInFlight(key.id);
       logRotation(reqId, key.email, `401 → key invalid (auth failure)`);
@@ -152,25 +161,20 @@ export async function GET(req: NextRequest) {
     }
 
     if (!upstream.ok) {
-      let payload: unknown = null;
-      try {
-        payload = await upstream.json();
-      } catch {
-        /* non-JSON */
-      }
-      if (classifyInvalidPayload(payload)) {
+      const failure = await classifyUpstreamFailure(upstream);
+      if (failure.kind === 'invalid') {
         markInvalid(key.id);
         decrementInFlight(key.id);
         logRotation(reqId, key.email, `${upstream.status} → key invalid (body)`);
         continue;
       }
-      if (classifyErrorPayload(payload)) {
+      if (failure.kind === 'limited') {
         markLimited(key.id, computeCooldownUntil(upstream.headers, group));
         decrementInFlight(key.id);
         logRotation(reqId, key.email, `${upstream.status} → rate limit (body)`);
         continue;
       }
-      if (upstream.status >= 500) {
+      if (failure.kind === 'provider') {
         markProviderError(key.id);
         decrementInFlight(key.id);
         totalTransientFailures++;
@@ -178,7 +182,7 @@ export async function GET(req: NextRequest) {
         continue;
       }
       decrementInFlight(key.id);
-      return NextResponse.json(payload ?? { error: 'Unknown error' }, {
+      return NextResponse.json(failure.payload ?? { error: 'Unknown error' }, {
         status: upstream.status,
         headers: buildResponseHeaders(upstream, false),
       });

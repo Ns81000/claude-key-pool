@@ -25,6 +25,7 @@ export interface GroupConfig {
 export interface AppConfig {
   activeGroupId: string | null;
   selectedModel: string | null;
+  smallFastModel?: string | null;
   groups: GroupConfig[];
   isConnected: boolean;
   backupSettings: string | null;
@@ -65,6 +66,7 @@ const CLAUDE_SETTINGS_PATH =
 const DEFAULT_CONFIG: AppConfig = {
   activeGroupId: null,
   selectedModel: null,
+  smallFastModel: null,
   groups: [],
   isConnected: false,
   backupSettings: null,
@@ -87,6 +89,7 @@ interface GlobalProxyState {
   configMtimeMs: number;
   configVersion: number; // bumped on every dashboard write
   cachedVersion: number; // version the cache was built at
+  lastStatAt: number; // ms epoch of the last filesystem stat
   writeChain: Promise<void>; // serializes config writes
 }
 
@@ -99,56 +102,85 @@ if (!globalForProxy.proxyState) {
     configMtimeMs: 0,
     configVersion: 0,
     cachedVersion: 0,
+    lastStatAt: 0,
     writeChain: Promise.resolve(),
   };
 }
 export const proxyState = globalForProxy.proxyState;
 
-function readConfigFromDisk(): AppConfig {
-  try {
-    if (fs.existsSync(CONFIG_FILE_PATH)) {
-      const data = fs.readFileSync(CONFIG_FILE_PATH, 'utf-8');
-      const parsed = JSON.parse(data) as Partial<AppConfig> & {
-        groups?: Array<Partial<GroupConfig> & { keys?: Array<Record<string, unknown>> }>;
-      };
-      // Migrate: strip any stats fields that may exist in an older config.json.
-      const groups: GroupConfig[] = (parsed.groups || []).map((g: any) => ({
-        id: String(g.id),
-        name: String(g.name ?? 'Untitled'),
-        targetUrl: String(g.targetUrl ?? ''),
-        model: typeof g.model === 'string' && g.model ? g.model : undefined,
-        rateLimitCooldownHours: typeof g.rateLimitCooldownHours === 'number' ? g.rateLimitCooldownHours : undefined,
-        disabled: g.disabled === true ? true : undefined,
-        keys: (g.keys || []).map((k: any) => ({
-          id: String(k.id),
-          email: String(k.email ?? ''),
-          key: String(k.key ?? ''),
-          disabled: k.disabled === true ? true : undefined,
-        })),
-      }));
-      return {
-        activeGroupId: parsed.activeGroupId ?? null,
-        selectedModel: typeof parsed.selectedModel === 'string' ? parsed.selectedModel : null,
-        groups,
-        isConnected: parsed.isConnected ?? false,
-        backupSettings: parsed.backupSettings ?? null,
-      };
-    }
-  } catch (error) {
-    console.error('Error loading config, returning defaults:', error);
-  }
-  return { ...DEFAULT_CONFIG };
+function parseConfig(text: string): AppConfig {
+  const parsed = JSON.parse(text) as Partial<AppConfig> & {
+    groups?: Array<Partial<GroupConfig> & { keys?: Array<Record<string, unknown>> }>;
+  };
+  // Migrate: strip any stats fields that may exist in an older config.json.
+  const groups: GroupConfig[] = (parsed.groups || []).map((g: any) => ({
+    id: String(g.id),
+    name: String(g.name ?? 'Untitled'),
+    targetUrl: String(g.targetUrl ?? ''),
+    model: typeof g.model === 'string' && g.model ? g.model : undefined,
+    rateLimitCooldownHours: typeof g.rateLimitCooldownHours === 'number' ? g.rateLimitCooldownHours : undefined,
+    disabled: g.disabled === true ? true : undefined,
+    keys: (g.keys || []).map((k: any) => ({
+      id: String(k.id),
+      email: String(k.email ?? ''),
+      key: String(k.key ?? ''),
+      disabled: k.disabled === true ? true : undefined,
+    })),
+  }));
+  return {
+    activeGroupId: parsed.activeGroupId ?? null,
+    selectedModel: typeof parsed.selectedModel === 'string' ? parsed.selectedModel : null,
+    smallFastModel: typeof parsed.smallFastModel === 'string' && parsed.smallFastModel ? parsed.smallFastModel : null,
+    groups,
+    isConnected: parsed.isConnected ?? false,
+    backupSettings: parsed.backupSettings ?? null,
+  };
 }
 
-// Fast config read: re-parse only when the file mtime changed or a dashboard
-// write bumped the in-memory version. The hot request path calls this.
+function readConfigFromDisk(): AppConfig {
+  let text: string | null = null;
+  try {
+    if (fs.existsSync(CONFIG_FILE_PATH)) {
+      text = fs.readFileSync(CONFIG_FILE_PATH, 'utf-8');
+    }
+  } catch (error) {
+    console.error('Error reading config.json:', error);
+  }
+  if (text === null) return { ...DEFAULT_CONFIG };
+
+  try {
+    return parseConfig(text);
+  } catch (error) {
+    // A corrupt config must not silently become an "empty pool" (every request
+    // would 400 with nothing visible in the dashboard): fall back to the
+    // backup, else fail loudly instead of pretending there are no keys.
+    console.error('config.json is corrupt:', error);
+    try {
+      const restored = parseConfig(fs.readFileSync(CONFIG_BACKUP_PATH, 'utf-8'));
+      console.error('Serving config.backup.json instead (config.json needs fixing).');
+      return restored;
+    } catch (backupError) {
+      throw new Error(
+        `config.json is corrupt and config.backup.json is unreadable — refusing to serve an empty pool. ` +
+          `Fix or restore config.json. (${backupError instanceof Error ? backupError.message : String(backupError)})`,
+      );
+    }
+  }
+}
+
+// Fast config read: re-parse when the file mtime changed (stat throttled to
+// at most once per second) or when a dashboard write bumped the in-memory
+// version. The hot request path calls this.
 export function loadConfig(): AppConfig {
-  // Fast path: if configVersion matches cachedVersion and we have a cache,
-  // skip the filesystem stat entirely (Bug #8 optimization).
+  const now = Date.now();
+  // Fast path: serve the cache when the last stat is fresh and no dashboard
+  // write bumped the version since. External edits to config.json are picked
+  // up within one second instead of being invisible until a restart.
   if (
     proxyState.configCache &&
     proxyState.cachedVersion === proxyState.configVersion &&
-    proxyState.configMtimeMs > 0
+    proxyState.configMtimeMs > 0 &&
+    now - proxyState.lastStatAt < 1000
   ) {
     return proxyState.configCache;
   }
@@ -159,6 +191,7 @@ export function loadConfig(): AppConfig {
   } catch {
     mtimeMs = 0;
   }
+  proxyState.lastStatAt = now;
 
   const stale =
     !proxyState.configCache ||
@@ -280,19 +313,12 @@ export function buildConfigView(config: AppConfig): AppConfigView {
 
 // Persistence ---------------------------------------------------------------
 
-function countKeys(config: AppConfig): number {
-  return config.groups.reduce((n, g) => n + g.keys.length, 0);
-}
-
 function writeConfigAtomic(config: AppConfig): void {
-  // Safety net: if this write would shrink the stored key set, keep a backup
-  // of the previous file so keys can never be silently lost.
+  // Always snapshot the previous file before overwriting: a bad edit (not
+  // just one that shrinks the key set) must stay recoverable.
   try {
     if (fs.existsSync(CONFIG_FILE_PATH)) {
-      const prev = readConfigFromDisk();
-      if (countKeys(prev) > countKeys(config)) {
-        fs.copyFileSync(CONFIG_FILE_PATH, CONFIG_BACKUP_PATH);
-      }
+      fs.copyFileSync(CONFIG_FILE_PATH, CONFIG_BACKUP_PATH);
     }
   } catch {
     /* backup is best-effort */
@@ -348,9 +374,14 @@ export function connectToClaude(config: AppConfig): AppConfig {
   settingsJson.env.ANTHROPIC_API_KEY = 'sk-ant-dummy-rotated-by-key-pool-proxy-9999';
   settingsJson.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
   const modelName = config.selectedModel || 'claude-opus-4-8';
+  // The small/fast model serves background and auto-mode classifier requests.
+  // Decoupling it from the main model keeps those tiny calls on a cheap fast
+  // model and makes them fail independently of the main model's availability.
+  const smallModel = config.smallFastModel || modelName;
   settingsJson.env.ANTHROPIC_DEFAULT_OPUS_MODEL = modelName;
   settingsJson.env.ANTHROPIC_DEFAULT_SONNET_MODEL = modelName;
-  settingsJson.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = modelName;
+  settingsJson.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = smallModel;
+  settingsJson.env.ANTHROPIC_SMALL_FAST_MODEL = smallModel;
   settingsJson.env.ANTHROPIC_DEFAULT_FABLE_MODEL = modelName;
   settingsJson.env.CLAUDE_CODE_EFFORT_LEVEL = 'high';
   settingsJson.effortLevel = 'high';
@@ -379,6 +410,20 @@ export function disconnectFromClaude(config: AppConfig): AppConfig {
     const settingsJson = JSON.parse(content) as { env?: Record<string, string> };
     if (settingsJson.env) {
       settingsJson.env.ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
+      // Strip the pool's dummy key and model overrides: leaving them would
+      // point the CLI at the real API with a fake key and pool-only model
+      // names — 401 / "model not found" on every request.
+      delete settingsJson.env.ANTHROPIC_API_KEY;
+      delete settingsJson.env.ANTHROPIC_AUTH_TOKEN;
+      for (const name of [
+        'ANTHROPIC_DEFAULT_OPUS_MODEL',
+        'ANTHROPIC_DEFAULT_SONNET_MODEL',
+        'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+        'ANTHROPIC_DEFAULT_FABLE_MODEL',
+        'ANTHROPIC_SMALL_FAST_MODEL',
+      ]) {
+        delete settingsJson.env[name];
+      }
     }
     fs.writeFileSync(tmp, JSON.stringify(settingsJson, null, 2), 'utf-8');
     fs.renameSync(tmp, CLAUDE_SETTINGS_PATH);

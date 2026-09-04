@@ -1,5 +1,6 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { loadConfig, saveConfig, disconnectFromClaude } from '@/lib/config';
+import { rejectCrossSiteRequest } from '@/lib/localGuard';
 
 export const dynamic = 'force-dynamic';
 
@@ -9,7 +10,9 @@ export const dynamic = 'force-dynamic';
 // Before exiting we restore the Claude CLI settings.json to its original state
 // (undoing any Connect) so we never leave the user pointed at a proxy that is
 // no longer running.
-export async function POST() {
+export async function POST(req: NextRequest) {
+  const rejected = rejectCrossSiteRequest(req);
+  if (rejected) return rejected;
   try {
     const config = loadConfig();
     if (config.isConnected) {

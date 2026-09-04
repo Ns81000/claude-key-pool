@@ -9,6 +9,7 @@ import {
   GroupConfig,
   resetKeysStatus,
 } from '@/lib/config';
+import { rejectCrossSiteRequest } from '@/lib/localGuard';
 
 export const dynamic = 'force-dynamic';
 
@@ -33,7 +34,9 @@ function sanitizeGroups(groups: unknown): GroupConfig[] {
   }));
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const rejected = rejectCrossSiteRequest(req);
+  if (rejected) return rejected;
   try {
     const config = loadConfig();
     return NextResponse.json(buildConfigView(config));
@@ -44,6 +47,8 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  const rejected = rejectCrossSiteRequest(req);
+  if (rejected) return rejected;
   try {
     const body = await req.json();
     const { action, config, activeGroupId } = body;

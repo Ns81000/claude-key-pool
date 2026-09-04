@@ -264,6 +264,11 @@ export function buildUpstreamHeaders(clientHeaders: Headers, apiKey: string): He
     headers.set(name, value);
   }
   headers.set('x-api-key', apiKey);
+  // Ask for an uncompressed body. undici decompresses gzip transparently, but
+  // peekStreamForLimit refuses to inspect a compressed stream head — without
+  // this header, compressing gateways silently disabled mid-stream key
+  // rotation (the skip-branch below is kept only as a safety net).
+  headers.set('accept-encoding', 'identity');
   return headers;
 }
 
@@ -527,4 +532,91 @@ export function createStallProtectedStream(
 // Mark a key limited from response headers (429 or classified error body).
 export function limitKeyFromHeaders(keyId: string, headers: Headers, group?: GroupConfig): void {
   markLimited(keyId, computeCooldownUntil(headers, group));
+}
+
+// ---------------------------------------------------------------------------
+// Shared rotation classification (used by both /v1/messages and /v1/models —
+// the two routes used to carry ~200 duplicated lines of this logic).
+// ---------------------------------------------------------------------------
+
+// Inspect a 429: key-level (cool it down), key-invalid, or IP-level (rotate
+// without punishing the current key).
+export type RateLimit429Kind = 'invalid' | 'key-limited' | 'ip-level';
+
+export async function classify429(upstream: Response): Promise<RateLimit429Kind> {
+  let payload: unknown = null;
+  try {
+    payload = await upstream.json();
+  } catch {
+    /* ignore */
+  }
+  if (classifyInvalidPayload(payload)) return 'invalid';
+  if (classifyErrorPayload(payload)) return 'key-limited';
+  return 'ip-level';
+}
+
+// Inspect a non-OK (non-429/401/403) response: what should the rotation do?
+export type UpstreamFailure =
+  | { kind: 'invalid' } // error body says the key is revoked/billing-failed
+  | { kind: 'limited' } // error body says rate/quota limit
+  | { kind: 'provider' } // 5xx / transient — try next key
+  | { kind: 'forward'; payload: unknown }; // genuine client error — return it
+
+export async function classifyUpstreamFailure(upstream: Response): Promise<UpstreamFailure> {
+  let payload: unknown = null;
+  try {
+    payload = await upstream.json();
+  } catch {
+    /* non-JSON error body */
+  }
+  if (classifyInvalidPayload(payload)) return { kind: 'invalid' };
+  if (classifyErrorPayload(payload)) return { kind: 'limited' };
+  if (upstream.status >= 500) return { kind: 'provider' };
+  return { kind: 'forward', payload };
+}
+
+// Inspect a 401. Some relays (agentrouter.org) reject the *client*, not the
+// key, when the request does not look like a Claude CLI request:
+// {"error":{"message":"unauthorized client detected, contact support..."}}.
+// Rotating keys on that answer is wrong twice over: every key would fail
+// identically, and a plain curl health-check would poison the whole pool with
+// 1-hour invalid marks. Distinguish it and forward the 401 to the client.
+export type Unauthorized401 =
+  | { kind: 'client-rejected'; payload: unknown } // the client, not the key
+  | { kind: 'key-invalid' }; // ordinary auth failure
+
+export async function classify401(upstream: Response): Promise<Unauthorized401> {
+  let payload: unknown = null;
+  try {
+    payload = await upstream.json();
+  } catch {
+    /* non-JSON body — treat as an ordinary auth failure */
+  }
+  const err = payload as { error?: { message?: string } | string; message?: string } | null;
+  const message = typeof err?.error === 'string' ? err.error : err?.error?.message ?? err?.message ?? '';
+  if (/unauthorized client detected/i.test(String(message))) {
+    return { kind: 'client-rejected', payload };
+  }
+  return { kind: 'key-invalid' };
+}
+
+// Network-level failures that indicate a problem with the group's URL (DNS,
+// connection refused, unreachable host) rather than with the individual key.
+// Such keys get a short provider-error cooldown so a dead group is skipped
+// fast, instead of being retried as a "slow" last resort on every request.
+const GROUP_LEVEL_NETWORK_CODES = new Set([
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ECONNREFUSED',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+]);
+
+export function isGroupLevelNetworkError(err: unknown): boolean {
+  const code = (err as { cause?: { code?: string } } | null)?.cause?.code;
+  return typeof code === 'string' && GROUP_LEVEL_NETWORK_CODES.has(code);
+}
+
+export function fetchErrorCode(err: unknown): string {
+  return String((err as { cause?: { code?: string } } | null)?.cause?.code ?? 'unknown');
 }
