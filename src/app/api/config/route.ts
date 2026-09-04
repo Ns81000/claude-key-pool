@@ -61,6 +61,9 @@ export async function POST(req: NextRequest) {
           groups: sanitizeGroups(config.groups),
           activeGroupId: config.activeGroupId ?? current.activeGroupId,
           selectedModel: typeof config.selectedModel === 'string' ? config.selectedModel : current.selectedModel,
+          smallFastModel: typeof config.smallFastModel === 'string' && config.smallFastModel
+            ? config.smallFastModel
+            : config.smallFastModel === null ? null : current.smallFastModel,
         };
       }
       await saveConfig(current);
@@ -100,8 +103,24 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === 'setModel') {
-      const { selectedModel } = body;
-      current = { ...current, selectedModel: typeof selectedModel === 'string' && selectedModel ? selectedModel : null };
+      // Each model field is optional: the dashboard updates the main model and
+      // the small/fast model through independent dropdowns.
+      if ('selectedModel' in body) {
+        current = {
+          ...current,
+          selectedModel: typeof body.selectedModel === 'string' && body.selectedModel
+            ? body.selectedModel
+            : null,
+        };
+      }
+      if ('smallFastModel' in body) {
+        current = {
+          ...current,
+          smallFastModel: typeof body.smallFastModel === 'string' && body.smallFastModel
+            ? body.smallFastModel
+            : null,
+        };
+      }
       await saveConfig(current);
       if (current.isConnected) {
         try {

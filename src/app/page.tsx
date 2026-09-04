@@ -344,6 +344,9 @@ export default function Home() {
   const [newKeyValue, setNewKeyValue] = useState('');
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
+  const [fastModelDropdownOpen, setFastModelDropdownOpen] = useState(false);
+  const fastModelDropdownRef = useRef<HTMLDivElement>(null);
+  const [testing, setTesting] = useState(false);
   const urlDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const pushToast = useCallback((message: string, tone: Toast['tone'] = 'default') => {
@@ -446,11 +449,52 @@ export default function Home() {
     }
   };
 
-  // Close model dropdown on outside click
+  const setFastModel = async (model: string | null) => {
+    try {
+      await post({ action: 'setModel', smallFastModel: model });
+      pushToast(model ? `Fast model set to ${model}` : 'Fast model follows the main model');
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : 'Error', 'error');
+    }
+  };
+
+  // Live probe through the pool: same path Claude Code uses, executed
+  // server-side by /api/test (the browser cannot set the claude-cli
+  // User-Agent that agentrouter's client filter requires).
+  const testPool = async () => {
+    if (!config?.selectedModel || testing) return;
+    setTesting(true);
+    try {
+      const res = await fetch('/api/test', { method: 'POST' });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        pushToast(`Test failed: ${data?.error ?? 'HTTP ' + res.status}`, 'error');
+      } else if (data?.ok) {
+        const secs = ((data.latencyMs as number) / 1000).toFixed(1);
+        pushToast(
+          `HTTP ${data.status} · ${data.model} · ${secs}s${data.text ? ' · ' + String(data.text).slice(0, 40) : ''}`,
+        );
+      } else {
+        pushToast(
+          `Test failed: HTTP ${data?.status ?? '?'}${data?.error ? ' · ' + data.error : ''}`,
+          'error',
+        );
+      }
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : 'Test failed', 'error');
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  // Close model dropdowns on outside click
   useEffect(() => {
     function handleClick(e: MouseEvent) {
       if (modelDropdownRef.current && !modelDropdownRef.current.contains(e.target as Node)) {
         setModelDropdownOpen(false);
+      }
+      if (fastModelDropdownRef.current && !fastModelDropdownRef.current.contains(e.target as Node)) {
+        setFastModelDropdownOpen(false);
       }
     }
     document.addEventListener('mousedown', handleClick);
@@ -798,6 +842,77 @@ export default function Home() {
                 </div>
               )}
             </div>
+            {/* Fast (small/background) model selector */}
+            <div ref={fastModelDropdownRef} className="relative">
+              <button
+                onClick={() => setFastModelDropdownOpen((v) => !v)}
+                title="Small/fast model for background and auto-mode requests (ANTHROPIC_SMALL_FAST_MODEL)"
+                className={`inline-flex items-center gap-2 h-10 px-3.5 rounded-[10px] border text-[13px] font-medium transition-colors cursor-pointer ${
+                  config?.smallFastModel
+                    ? 'border-hairline bg-surface-soft text-ink hover:border-border-strong'
+                    : 'border-hairline bg-transparent text-muted hover:border-border-strong'
+                }`}
+              >
+                <Zap className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate max-w-[140px]">
+                  {config?.smallFastModel || 'Fast: same as main'}
+                </span>
+                <ChevronDown className={`w-3.5 h-3.5 shrink-0 transition-transform ${fastModelDropdownOpen ? 'rotate-180' : ''}`} />
+              </button>
+              {fastModelDropdownOpen && (
+                <div className="absolute top-full right-0 mt-1.5 min-w-[220px] bg-canvas border border-hairline rounded-[10px] shadow-lg py-1.5 z-50">
+                  <button
+                    onClick={() => {
+                      setFastModel(null);
+                      setFastModelDropdownOpen(false);
+                    }}
+                    className={`w-full text-left px-4 py-2 text-[13px] transition-colors cursor-pointer ${
+                      !config?.smallFastModel
+                        ? 'bg-surface-soft text-ink font-medium'
+                        : 'text-body hover:bg-surface-soft'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span>Same as main model</span>
+                      {!config?.smallFastModel && (
+                        <Check className="w-3.5 h-3.5 text-[color:var(--color-status-ready)] shrink-0" />
+                      )}
+                    </div>
+                  </button>
+                  {availableModels.map((m) => (
+                    <button
+                      key={m}
+                      onClick={() => {
+                        setFastModel(m);
+                        setFastModelDropdownOpen(false);
+                      }}
+                      className={`w-full text-left px-4 py-2 text-[13px] transition-colors cursor-pointer ${
+                        config?.smallFastModel === m
+                          ? 'bg-surface-soft text-ink font-medium'
+                          : 'text-body hover:bg-surface-soft'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="truncate">{m}</span>
+                        {config?.smallFastModel === m && (
+                          <Check className="w-3.5 h-3.5 text-[color:var(--color-status-ready)] shrink-0" />
+                        )}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <Button
+              variant="secondary"
+              className="h-10 px-3.5"
+              onClick={testPool}
+              disabled={!config?.selectedModel || testing}
+              title="Send a live probe request through the pool"
+            >
+              <Activity className="w-4 h-4" />
+              {testing ? 'Testing…' : 'Test'}
+            </Button>
             <Button variant={connected ? 'secondary' : 'primary'} onClick={toggleConnection}>
               {connected ? (
                 <>
@@ -898,6 +1013,7 @@ export default function Home() {
                 {config?.groups.map((group) => {
                   const isActive = config.activeGroupId === group.id;
                   const isGroupDisabled = !!group.disabled;
+                  const inPool = !isGroupDisabled && !!group.model && group.model === config.selectedModel;
                   const groupActiveKeys = group.keys.filter(k => !k.disabled && k.status === 'active').length;
                   const groupLimitedKeys = group.keys.filter(k => !k.disabled && k.status === 'rate-limited').length;
                   const groupInvalidKeys = group.keys.filter(k => !k.disabled && k.status === 'invalid').length;
@@ -928,6 +1044,14 @@ export default function Home() {
                           }`}>
                             {group.name}
                           </span>
+                          {inPool && (
+                            <span
+                              title="This group matches the selected model and participates in routing"
+                              className="shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-[4px] bg-[color:var(--color-status-ready-bg)] text-[color:var(--color-status-ready)]"
+                            >
+                              pool
+                            </span>
+                          )}
                         </div>
                         <div className="flex items-center gap-1.5">
                           <ToggleSwitch
@@ -1147,6 +1271,13 @@ export default function Home() {
                 <span className="text-ink font-medium">Connect</span> to sync your Claude CLI
                 settings.json automatically. Click{' '}
                 <span className="text-ink font-medium">Disconnect</span> to restore it.
+              </p>
+              <p className="text-[14px] text-body">
+                The <Zap className="w-3.5 h-3.5 inline-block -mt-0.5" /> dropdown picks the{' '}
+                <span className="text-ink font-medium">small/fast model</span> used for background and
+                auto-mode requests — leave it on &quot;same as main&quot; to route everything through one model.
+                The <span className="text-ink font-medium">Test</span> button sends a live probe
+                request through the pool to verify routing end-to-end.
               </p>
               <p className="text-[14px] text-body">
                 To point tools manually, set{' '}
