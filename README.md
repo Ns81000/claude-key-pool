@@ -1,195 +1,196 @@
-<div align="center">
+# Claude Key Pool (локальная развёртка)
 
-<img src="public/logo.svg" width="76" height="76" alt="Claude Key Pool logo" />
+Локальный прокси `127.0.0.1:9999` (Next.js 16) для **Claude Code**: пул
+агентских ключей agentrouter с честным round-robin, карантинами исчерпанных
+ключей и перекатом на следующий ключ внутри того же запроса — в том числе
+посреди SSE-стрима. Клон [Ns81000/claude-key-pool](https://github.com/Ns81000/claude-key-pool)
+с локальными правками (коммит `0115ad0`: привязка слушателя к `127.0.0.1`,
+drive-by-защита, классификация 401). Локальные коммиты — можно, **push в
+апстрим запрещён**.
 
-# Claude Key Pool
+## Место в экосистеме
 
-**A fast, local proxy that pools your Anthropic-compatible API keys and load-balances every request across the entire pool via true round-robin — rotating instantly when any key hits a rate or usage limit, including mid-stream. Select your model once in the dashboard, and only matching groups participate in routing.**
+Пул — один из двух локальных сервисов перед `agentrouter.org`; у каждого
+свой клиент и своя задача (подробное описание — в README соседнего
+`C:\proxy_ai`):
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-181d26?style=flat-square)](LICENSE)
-[![Next.js 16](https://img.shields.io/badge/Next.js-16-181d26?style=flat-square&logo=nextdotjs&logoColor=white)](https://nextjs.org)
-[![React 19](https://img.shields.io/badge/React-19-181d26?style=flat-square&logo=react&logoColor=white)](https://react.dev)
-[![Tailwind v4](https://img.shields.io/badge/Tailwind-v4-181d26?style=flat-square&logo=tailwindcss&logoColor=white)](https://tailwindcss.com)
-[![Platform](https://img.shields.io/badge/Windows-ready-aa2d00?style=flat-square&logo=windows&logoColor=white)](#-install-on-windows-one-command)
-[![Port](https://img.shields.io/badge/port-9999-fcab79?style=flat-square&labelColor=181d26)](http://localhost:9999)
-
-</div>
-
----
-
-## What it does
-
-Claude Key Pool sits between the Claude Code CLI (or any Anthropic-compatible SDK) and one or more upstream endpoints. You give it **groups** of API keys — each group with its own upstream URL and cooldown settings — and the proxy **flattens every key into a single global pool**, distributing requests evenly via true round-robin. When a key is rate-limited, out of quota, or invalid, the proxy **automatically rotates to the next available key** so a single exhausted key never interrupts your session.
-
-### Key features
-
-- **True round-robin** — every request gets a different key. No more burning through one key before touching the next.
-- **Flat global pool** — all keys from all groups participate equally. Each key still routes through its own group's upstream URL and respects its group's cooldown settings.
-- **Disable without deleting** — temporarily disable individual keys or entire groups from the dashboard. Disabled items are skipped during routing and stay off until you re-enable them.
-- **Concurrency-aware** — tracks in-flight requests per key and prefers idle keys, preventing multiple simultaneous requests from piling onto the same key.
-- **Mid-stream aware** — detects error events emitted *inside* a streaming (SSE) response before any content reaches you, and silently retries on a working key. You see one clean stream.
-- **Stall protection** — if an upstream stops sending data mid-stream, the proxy aborts after 120 seconds instead of hanging forever.
-- **Honors `retry-after`** — cooldowns respect the upstream's `retry-after` and `anthropic-ratelimit-*-reset` headers; a limited key auto-recovers when its cooldown ends.
-- **Slow-key deprioritization** — keys that recently timed out are ranked last, not skipped, so they get a second chance without dragging down the pool.
-- **Robust & fast** — reads config from an in-memory cache on the hot path (no filesystem stat per request), never writes to disk per request, and forwards request bodies without needless re-serialization.
-- **Groups** — organize keys by upstream endpoint. Each group has its own target URL and optional custom cooldown duration.
-- **Per-group model** — assign a model name to each group (e.g. `claude-opus-4-8`). Select the active model from the dashboard header; only groups matching that model are used for routing.
-- **Live terminal logs** — color-coded, real-time request lifecycle logging with request IDs, key selection, rotation reasons, timing, and pool status summaries.
-- **Minimal dashboard** — a calm, editorial UI at `http://localhost:9999` with a global pool stats banner showing total/active/rate-limited/invalid/disabled/in-flight counts per key.
-
----
-
-## 🚀 Install on Windows (one command)
-
-**Prerequisites** — if you don't already have them, run these first in PowerShell (or install manually):
-
-```powershell
-winget install --id Git.Git -e
-winget install --id OpenJS.NodeJS.LTS -e
+```
+                    ┌────────────────────────────────────────────┐
+                    │              agentrouter.org               │
+                    │  WAF (sensitive words) + UA-фильтр клиентов│
+                    └──────────▲───────────────────▲─────────────┘
+                               │                   │
+                               │                   │   ключ из пула
+                               │                   │   (ротация, карантин)
+     ┌──────────────────┐      │                   │      ┌──────────────────────┐
+     │  proxy_ai :8318  ├──────┘                   └──────┤ claude-key-pool :9999│
+     │  Python/FastAPI  │                                  │  Next.js             │
+     │  WAF-кодек +     │                                  │  ротация 15 ключей   │
+     │  маска UA + пул  │                                  │  agentrouter         │
+     └─────────▲────────┘                                  └──────────▲───────────┘
+               │                                                      │
+               │ /v1/messages (Anthropic)                             │ /v1/messages
+               │ или /v1/chat/completions (OpenAI)                    │ (Anthropic)
+     ┌─────────┴────────┐                                   ┌──────────┴──────────┐
+     │     Kilo Code    │                                   │    Claude Code     │
+     └──────────────────┘                                   └─────────────────────┘
 ```
 
-> pnpm is enabled automatically by the installer via `corepack` (bundled with Node). No separate install needed.
+- **claude-key-pool (9999)** — маршрут Claude Code: мультиаккаунтная ротация.
+  Claude Code WAF не триггерит, кодек не нужен; его User-Agent (`claude-cli/…`)
+  пул пересылает наверх как есть и проходит UA-фильтр agentrouter.
+- **proxy_ai (8318)** — маршрут Kilo Code (WAF-кодек + маска UA). К этому пулу
+  отношения не имеет.
 
-**Then run the one-command installer.** Open a **new** PowerShell window and paste:
+## Текущая конфигурация
 
-```powershell
-irm https://raw.githubusercontent.com/Ns81000/claude-key-pool/main/install.ps1 | iex
-```
-
-This clones the repo to `%USERPROFILE%\claude-key-pool`, installs dependencies, builds the app, and creates a **"Claude Key Pool" shortcut on your Desktop** (with the app logo). It then launches the dashboard in your browser.
-
-**From then on, just double-click the desktop shortcut** — it starts the server and opens the UI automatically. That's it.
-
-### Updating
-
-To upgrade to the latest version at any time, open PowerShell and run:
-
-```powershell
-irm https://raw.githubusercontent.com/Ns81000/claude-key-pool/main/update.ps1 | iex
-```
-
-This stops any running server, pulls the latest code, reinstalls dependencies, rebuilds, and relaunches. Your saved keys in `config.json` are never touched.
-
----
-
-## Using the dashboard
-
-1. **Create a group** — click `+`, give it a name, the upstream URL (e.g. `https://api.anthropic.com`), and a model name (e.g. `claude-opus-4-8`). Optionally set a custom rate-limit cooldown duration (in hours).
-2. **Add keys** — one at a time, with an optional email/label. Keys are stored locally in `config.json` (which is git-ignored and never leaves your machine).
-3. **Select a model** — use the model dropdown in the header bar to choose which model to route through. Only groups with a matching model field are used.
-4. **Disable/enable** — use the toggle switch next to any group or key to temporarily disable it without deleting. Disabled items are skipped during routing and shown dimmed in the UI. Re-enable any time with one click.
-5. **Connect Claude Code** — click **Connect** in the top bar. It rewrites your Claude CLI `settings.json` to route through the proxy using the selected model (and backs up the original, restored on **Disconnect** — or automatically when you **Stop the server** from the dashboard).
-
-The **pool stats banner** at the top shows the real-time health of your entire key pool: total keys, active, rate-limited, invalid, disabled, and in-flight requests.
-
-Only groups whose model matches the selected model participate in routing. Groups are an organizational tool — they let you set different upstream URLs, cooldown settings, and model names per provider.
-
-Prefer manual setup? Point any Anthropic SDK at the proxy:
-
-```bat
-set ANTHROPIC_BASE_URL=http://localhost:9999
-```
-
----
-
-## Manual / cross-platform setup
-
-Any OS with Node 20+ and pnpm:
-
-```bash
-git clone https://github.com/Ns81000/claude-key-pool.git
-cd claude-key-pool
-pnpm install
-pnpm build
-pnpm start        # serves on http://localhost:9999
-```
-
-For development with hot reload: `pnpm dev`.
-
----
-
-## How rotation works
-
-| Condition | Action |
+| Параметр | Значение |
 |---|---|
-| `429 Too Many Requests` (key-level) | Mark key rate-limited, honor `retry-after`, rotate |
-| `429 Too Many Requests` (IP-level) | Rotate to next key **without** cooling down the current one |
-| `401 Unauthorized` | Mark key **invalid** (auto-recovers after 1 hour), rotate |
-| `403 Forbidden` | Transient provider error (5-min cooldown), rotate |
-| `400 invalid_request_error` | Client error (e.g. bad model name) — returned cleanly to client, keys NOT killed |
-| Error body: `rate_limit_error`, `overloaded_error`, quota/credit/usage/token limit | Mark limited, rotate |
-| SSE error event **before** any content | Silently retry next key — client sees one clean stream |
-| SSE error event **after** content started | Forward as-is (can't swap mid-answer), but mark limited so the *next* request rotates |
-| `5xx` / network / timeout | Transient — try next key (marked slow to deprioritize); `502` only if all keys fail transiently |
-| Upstream stalls (no data for 120s) | Abort the connection and error to the client |
-| All keys exhausted | Clean `429` to the client |
+| Группа `group_agentrouter` | targetUrl `https://agentrouter.org`, model `glm-5.3`, карантин rate-limit 10 ч, **15 ключей** |
+| Группа `group_agentrouter_fast` | disabled, model `deepseek-v4-flash`, 2 ключа |
+| `selectedModel` | `glm-5.3` — в ротации участвуют только группы с этой моделью |
+| `smallFastModel` | `glm-5.3` (был `deepseek-v4-flash`; фоновые запросы Claude Code идут через ту же модель) |
+| `isConnected` | `true` — Claude Code подключён |
 
-### Selection priority
+Ключи лежат в `config.json` (в `.gitignore`, в коммиты не попадает). Рантайм
+перечитывает его автоматически по изменению mtime — правка файла или сохранение
+из панели применяется без рестарта.
 
-The round-robin selects keys in this priority order:
-
-1. **Idle, non-slow** — active key with zero in-flight requests and no recent timeouts (best)
-2. **Busy, non-slow** — active key with the fewest in-flight requests
-3. **Slow** — active key that recently timed out (last resort, still used if nothing else is available)
-
----
-
-## Terminal logs
-
-The terminal window shows color-coded, real-time logs for every request:
+## Схема прохождения запроса
 
 ```
-──────────────────────────────────────────────────────────────────────────
-  →  16:42:03  #1 POST /v1/messages [stream]
-  ℹ  16:42:03  #1 Model: claude-sonnet-4-20250514
-  ℹ  16:42:03 [user@example.com] #1 Selected from group "Production" (0 in-flight)
-  ✔  16:42:05 [user@example.com] #1 Completed in 1.8s
-  ✔  16:42:05 [user@example.com] #1 Streaming response to client...
-  ℹ  16:42:12 [user@example.com] #1 Stream completed
-──────────────────────────────────────────────────────────────────────────
-  →  16:42:15  #2 POST /v1/messages [stream]
-  ℹ  16:42:15 [other@example.com] #2 Selected from group "Backup" (0 in-flight)
-  ⚠  16:42:16 [other@example.com] #2 Rotating → 429 → rate limited (key cooled down)
-  ℹ  16:42:16 [user@example.com] #2 Selected from group "Production" (0 in-flight)
-  ✔  16:42:18 [user@example.com] #2 Completed in 2.9s
+ Claude Code ──► POST /v1/messages (Anthropic-формат)
+    │              UA claude-cli/…, dummy-ключ sk-ant-dummy-rotated-…
+    ▼
+ claude-key-pool :9999
+    ├─ 1. Выбор ключа: flat-pool из групп с model === selectedModel,
+    │      round-robin, приоритет незанятым ключам (см. ниже)
+    ├─ 2. Заголовки: клиентская авторизация СТИРАЕТСЯ,
+    │      x-api-key: <ключ пула>, accept-encoding: identity,
+    │      User-Agent клиента сохраняется
+    ├─ 3. Тело запроса уходит БЕЗ ИЗМЕНЕНИЙ — модель не подменяется
+    ▼
+ agentrouter.org
+    │
+    ├─ 200 ──► стрим/ответ клиенту как есть
+    ├─ ошибка ключа ──► карантин ключа + следующий ключ В ТОМ ЖЕ
+    │                   запросе (клиент ничего не замечает)
+    └─ все ключи выбыли ──► 429/502 клиенту
 ```
 
-Each log line shows: level icon, timestamp, key label, request ID, and a human-readable message.
+**Пул не подменяет модель в теле запроса.** Маппинг модели делается на клиенте:
+connect прописывает в настройках Claude Code переменные `ANTHROPIC_DEFAULT_*_MODEL`
+(см. ниже), и CLI сам шлёт нужное имя. Роль фильтра групп — `buildFlatPool`
+включает в ротацию только группы, у которых `model` совпадает с `selectedModel`.
 
----
+## Ротация и карантин
 
-## Where your keys live
+| Что случилось | Реакция |
+|---|---|
+| `429` по ключу | карантин ключа по `retry-after` / `anthropic-ratelimit-*-reset` (нет заголовков — `rateLimitCooldownHours` группы, для agentrouter 10 ч), перекат |
+| `429` на уровне IP | перекат **без** карантина текущего ключа |
+| `401` апстрим отвергает сам клиент (не ключ) | ответ уходит клиенту, ключ НЕ карантинится |
+| `401` ключ невалиден | ключ invalid (авто-возврат через 1 ч), перекат |
+| `403` | transient-ошибка провайдера, карантин 5 мин, перекат |
+| `400 invalid_request_error` | ошибка клиента (например, неверное имя модели) — возвращается клиенту, ключи не трогаются |
+| тело ошибки: `rate_limit_error`, `overloaded_error`, квота/кредит/лимит токенов | карантин ключа, перекат |
+| SSE-ошибка ДО первого контента | тихий retry на следующий ключ — клиент видит один чистый стрим |
+| SSE-ошибка ПОСЛЕ начала контента | переслать как есть (среди ответа не подменишь), ключ в карантин для следующего запроса |
+| `5xx` / сеть / таймаут | transient — следующий ключ (медленный ключ деприоритизируется); `502` только если transient-ошибки на всех |
+| тишина стрима 120 с | обрыв соединения, ошибка клиенту |
+| все ключи выбыли | чистый `429` клиенту |
 
-Your keys are stored **only** in a local `config.json` at the project root. This file is **git-ignored** — it is never committed or pushed. A safe template lives in [`config.example.json`](config.example.json). Runtime status (rate-limited / cooldown / in-flight) is kept in memory and never written to disk.
+### Приоритет выбора ключа
 
----
+1. Свободный и не «медленный» (0 in-flight, без недавних таймаутов).
+2. Занятый не «медленный» — с минимальным числом in-flight.
+3. «Медленный» (недавний таймаут) — последним, но не выбрасывается из пула.
 
-## Architecture
+## Подключение Claude Code
 
+Кнопка **Connect** в панели (`POST /api/config {"action":"connect"}`) пишет
+`~/.claude/settings.json`:
+
+| Переменная | Значение |
+|---|---|
+| `ANTHROPIC_BASE_URL` | `http://localhost:9999` |
+| `ANTHROPIC_API_KEY` | `sk-ant-dummy-rotated-by-key-pool-proxy-9999` (заглушка; настоящий ключ подставляет пул) |
+| `ANTHROPIC_DEFAULT_OPUS/SONNET/FABLE_MODEL` | `selectedModel` (`glm-5.3`) |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL` | `smallFastModel` (`glm-5.3`) |
+| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | `1` |
+| `CLAUDE_CODE_EFFORT_LEVEL` | `high` (также поле верхнего уровня `effortLevel`) |
+
+- Прежнее содержимое настроек сохраняется **целиком** в `config.backupSettings`
+  пула; **Disconnect** восстанавливает его дословно. Остальные ключи настроек
+  (permissions, hooks, statusLine) connect не трогает.
+- Побочный эффект: `effortLevel` и `model` в настройках перезаписываются
+  (`high` / имя модели); прежние значения вернёт Disconnect.
+- Изменения env подхватываются **новыми** сессиями Claude Code; уже запущенная
+  сессия продолжает работать на прежнем окружении.
+
+## Панель управления
+
+`http://127.0.0.1:9999` — группы, ключи, статусы, действия:
+
+- создать/удалить/выключить группу или отдельный ключ (toggle — без удаления);
+- добавить ключи (email/метка — то, что видно в логах вместо значения ключа);
+- выбрать модель в шапке (`setModel`) — меняет состав ротации;
+- **Connect / Disconnect** для Claude Code;
+- сбросить карантин группы (`resetGroupRateLimit`);
+- баннер статистики: всего / активных / rate-limited / invalid / disabled /
+  in-flight.
+
+API:
+
+| Метод | Путь | Назначение |
+|---|---|---|
+| `POST` | `/v1/messages` | основной прокси-маршрут (ротация, перекаты) |
+| `GET` | `/v1/models` | список моделей апстрима (тоже через ротацию; без выбранной модели — 400) |
+| `GET` | `/api/config` | конфиг + живые статусы ключей |
+| `POST` | `/api/config` | действия: `save`, `setActiveGroup`, `resetGroupRateLimit`, `connect`, `disconnect`, `setModel` |
+| `POST` | `/api/shutdown` | остановка сервера из панели (при этом авто-disconnect) |
+
+Ручки `/api/*` закрыты от cross-site запросов (`localGuard`): POST из чужой
+вкладки браузера отбивается.
+
+## Запуск
+
+```powershell
+# из каталога claude-key-pool
+pnpm start        # прод-сервер на 127.0.0.1:9999
+pnpm dev          # режим разработки (hot reload)
 ```
-┌─────────────────┐      ┌──────────────────────────────┐      ┌────────────────────┐
-│  Claude CLI /    │      │  Next.js App (port 9999)     │      │  Upstream API      │
-│  Any SDK Client  │─────▶│                              │─────▶│  (per-group URL)   │
-│                  │      │  Flat Pool Round-Robin Engine │      │                    │
-│                  │      │  ┌────────────────────────┐  │      └────────────────────┘
-│                  │      │  │ Group A keys ──┐       │  │
-│                  │      │  │ Group B keys ──┼─ Pool │  │
-│                  │      │  │ Group C keys ──┘       │  │
-│                  │◀─────│  └────────────────────────┘  │
-└─────────────────┘      └──────────────────────────────┘
-                                    │
-                             ┌──────┴──────┐
-                             │ config.json  │ (keys on disk)
-                             │ proxyState   │ (runtime in memory)
-                             └─────────────┘
-```
 
----
+Скрипт `start-key-pool.cmd` в корне — локальный лаунчер (запуск/открытие
+панели).
 
-## Tech
+## Безопасность
 
-Next.js 16 (App Router) · React 19 · Tailwind CSS v4 · TypeScript · lucide-react. Runs on port **9999**.
+- `config.json` и `config.backup.json` — в `.gitignore`; ключи не коммитятся
+  и не отправляются на апстрим-маскировку.
+- Слушатель привязан к `127.0.0.1` (локальная правка; в апстриме — открытый
+  хост).
+- В терминальных логах фигурируют только метки ключей (`email`), не значения.
+- **Осторожно с `GET /api/config`**: в отличие от proxy_ai, пул отдаёт значения
+  ключей **без маски** — ответ предназначен только панели на localhost и не
+  должен попадать в логи/вывод скриптов без фильтрации полей.
+- Клиентская авторизация стирается и замещается ключом пула — перехватить
+  чужой ключ через пул нельзя, но и passthrough клиентского ключа здесь нет
+  (это осознанное отличие от proxy_ai).
 
-## License
+## Файлы
 
-[MIT](LICENSE) © 2026 Ns81000
+- `src/app/v1/messages/route.ts` — основной прокси-маршрут (ротация, классификация ошибок, перекаты)
+- `src/app/v1/models/route.ts` — тот же движок для `GET /v1/models`
+- `src/app/api/config/route.ts` — панельные действия, `localGuard`
+- `src/app/api/shutdown/route.ts` — остановка сервера (с авто-disconnect)
+- `src/lib/proxy.ts` — выбор ключа (`getNextCandidate`, `buildFlatPool`), заголовки, классификация ответов, cooldown
+- `src/lib/config.ts` — `config.json` (mtime-кеш, hot reload), `connectToClaude`/`disconnectFromClaude`, атомарная запись
+- `src/lib/localGuard.ts` — cross-site защита ручек `/api/*`
+- `src/lib/logger.ts` — цветные терминальные логи (метка ключа, ID запроса, причины ротации)
+- `config.json` — конфигурация с ключами (в `.gitignore`); `config.backup.json` — автоснимок пула перед перезаписью; `config.example.json` — шаблон
+- `install.ps1` / `update.ps1` — скрипты апстрима (к этой локальной копии не применяются)
+
+## Лицензия
+
+[MIT](LICENSE) © 2026 Ns81000 — сохранена от апстрима.
