@@ -37,8 +37,12 @@ drive-by-защита, классификация 401). Локальные ко�
 ```
 
 - **claude-key-pool (9999)** — маршрут Claude Code: мультиаккаунтная ротация.
-  Claude Code WAF не триггерит, кодек не нужен; его User-Agent (`claude-cli/…`)
-  пул пересылает наверх как есть и проходит UA-фильтр agentrouter.
+  Claude Code WAF не триггерит, кодек не нужен. Все запросы к апстриму идут
+  с маской User-Agent `claude-cli/2.0.0 (external, cli)` — агентрантера
+  отвергает «неразрешённые» клиенты по UA (401 «unauthorized client
+  detected»), а браузер не может подменить свой UA, поэтому пул подставляет
+  маску сам (коммит `0a9ed15`; тот же приём, что proxy_ai делает с
+  `codex_cli_rs` для Kilo Code).
 - **proxy_ai (8318)** — маршрут Kilo Code (WAF-кодек + маска UA). К этому пулу
   отношения не имеет.
 
@@ -66,8 +70,8 @@ drive-by-защита, классификация 401). Локальные ко�
     ├─ 1. Выбор ключа: flat-pool из групп с model === selectedModel,
     │      round-robin, приоритет незанятым ключам (см. ниже)
     ├─ 2. Заголовки: клиентская авторизация СТИРАЕТСЯ,
-    │      x-api-key: <ключ пула>, accept-encoding: identity,
-    │      User-Agent клиента сохраняется
+    │      User-Agent заменяется маской claude-cli/…,
+    │      x-api-key: <ключ пула>, accept-encoding: identity
     ├─ 3. Тело запроса уходит БЕЗ ИЗМЕНЕНИЙ — модель не подменяется
     ▼
  agentrouter.org
