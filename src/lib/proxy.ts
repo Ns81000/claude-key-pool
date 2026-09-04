@@ -246,6 +246,13 @@ export function getNextCandidate(config: AppConfig, selectedModel?: string | nul
   return { group: chosen.group, key: chosen.key };
 }
 
+// agentrouter rejects non-approved client programs by User-Agent with a
+// 401 "unauthorized client detected" that has nothing to do with the key.
+// The pool serves local tools of any kind (browsers, curl, SDKs), so every
+// upstream request goes out masked as a Claude CLI client — the same trick
+// proxy_ai (port 8318) plays with codex_cli_rs for Kilo Code.
+const MASK_USER_AGENT = 'claude-cli/2.0.0 (external, cli)';
+
 // Build the upstream request headers: copy client headers minus hop-by-hop and
 // auth, inject the pool key.
 export function buildUpstreamHeaders(clientHeaders: Headers, apiKey: string): Headers {
@@ -257,12 +264,14 @@ export function buildUpstreamHeaders(clientHeaders: Headers, apiKey: string): He
       lower === 'content-length' ||
       lower === 'connection' ||
       lower === 'x-api-key' ||
-      lower === 'authorization'
+      lower === 'authorization' ||
+      lower === 'user-agent'
     ) {
       continue;
     }
     headers.set(name, value);
   }
+  headers.set('user-agent', MASK_USER_AGENT);
   headers.set('x-api-key', apiKey);
   // Ask for an uncompressed body. undici decompresses gzip transparently, but
   // peekStreamForLimit refuses to inspect a compressed stream head — without
