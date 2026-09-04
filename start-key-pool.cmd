@@ -24,14 +24,22 @@ if not errorlevel 1 (
   exit /b 0
 )
 
-rem Make sure pnpm is available when launched directly (double-click).
+rem Make sure pnpm is available when launched directly via double-click.
+rem On this machine pnpm comes through corepack because the global pnpm
+rem shim could not be installed, so accept either form.
 where pnpm >nul 2>nul
 if errorlevel 1 (
-  echo   ERROR: pnpm was not found on your PATH.
-  echo   Re-run the installer, or install pnpm with: npm install -g pnpm
-  echo.
-  pause
-  exit /b 1
+  where corepack >nul 2>nul
+  if errorlevel 1 (
+    echo   ERROR: neither pnpm nor corepack was found on your PATH.
+    echo   Install Node.js LTS and retry.
+    echo.
+    pause
+    exit /b 1
+  )
+  set "PNPM_CMD=corepack pnpm"
+) else (
+  set "PNPM_CMD=pnpm"
 )
 
 rem Open the browser once the server answers, from a HIDDEN helper that exits
@@ -46,7 +54,7 @@ set FORCE_COLOR=1
 
 rem Run the production server in the FOREGROUND of this window. Closing this
 rem window stops the proxy, exactly as the message above promises.
-call pnpm start
+call %PNPM_CMD% start
 
 echo.
 echo   The server has stopped. You can close this window.

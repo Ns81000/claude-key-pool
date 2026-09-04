@@ -18,7 +18,7 @@
   --color-status-invalid: #aa2d00;
   --color-status-invalid-bg: #fbefe9;
 
-  --font-sans: var(--font-inter), system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "Segoe UI Mono", monospace;
 
   --radius-sm: 6px;
