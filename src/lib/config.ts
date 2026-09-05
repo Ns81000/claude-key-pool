@@ -441,9 +441,12 @@ export function connectToClaude(config: AppConfig): AppConfig {
   // so /model inside a live session actually switches between them (the pool
   // routes by the request's model name, no restart needed). The main model
   // takes the top slots (Opus/Fable); other pool models fill Sonnet/Haiku.
-  // When the pool has only the main model, every slot maps to it (the
-  // previous behavior).
+  // Disabled groups do not participate — a slot mapped to their model would
+  // show in /model but 400 on every request ("no enabled group serves
+  // model"). When the pool has only the main model, every slot maps to it
+  // (the previous behavior).
   const otherModels = config.groups
+    .filter((g) => !g.disabled)
     .map((g) => g.model)
     .filter((m): m is string => !!m && m !== modelName && m !== smallModel);
   settingsJson.env.ANTHROPIC_DEFAULT_OPUS_MODEL = modelName;
