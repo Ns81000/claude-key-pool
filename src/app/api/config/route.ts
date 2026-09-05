@@ -5,6 +5,8 @@ import {
   StaleConfigVersionError,
   connectToClaude,
   disconnectFromClaude,
+  connectToKilo,
+  disconnectFromKilo,
   buildConfigView,
   AppConfig,
   GroupConfig,
@@ -133,6 +135,22 @@ export async function POST(req: NextRequest) {
     if (action === 'disconnect') {
       const current = await mutateConfig((cfg) => {
         disconnectFromClaude(cfg);
+      });
+      return NextResponse.json(buildConfigView(current));
+    }
+
+    // Kilo Code profile — independent of the Claude CLI one: both may be
+    // connected at once, either alone, or neither. Same pool, same port.
+    if (action === 'kiloConnect') {
+      const current = await mutateConfig((cfg) => {
+        connectToKilo(cfg); // throws before writing on failure
+      });
+      return NextResponse.json(buildConfigView(current));
+    }
+
+    if (action === 'kiloDisconnect') {
+      const current = await mutateConfig((cfg) => {
+        disconnectFromKilo(cfg);
       });
       return NextResponse.json(buildConfigView(current));
     }

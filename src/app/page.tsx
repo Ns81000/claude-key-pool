@@ -732,6 +732,21 @@ export default function Home() {
     }
   };
 
+  const toggleKiloConnection = async () => {
+    if (!config) return;
+    const action = config.kiloConnected ? 'kiloDisconnect' : 'kiloConnect';
+    try {
+      await post({ action });
+      pushToast(
+        action === 'kiloConnect'
+          ? 'Connected to Kilo Code (provider "claude-key-pool" added to kilo.jsonc)'
+          : 'Disconnected from Kilo Code (provider removed)',
+      );
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : 'Kilo connection failed', 'error');
+    }
+  };
+
   const [stopped, setStopped] = useState(false);
   const stopServer = () => {
     setConfirm({
@@ -776,6 +791,7 @@ export default function Home() {
   }
 
   const connected = !!config?.isConnected;
+  const kiloConnected = !!config?.kiloConnected;
   const poolStats: PoolStats = config?.poolStats ?? {
     totalKeys: 0,
     activeKeys: 0,
@@ -807,6 +823,16 @@ export default function Home() {
               <span className="text-[14px] text-muted">
                 {connected ? 'Connected' : 'Disconnected'}
               </span>
+            </div>
+            <div className="flex items-center gap-2" title="Kilo Code profile (kilo.jsonc) — independent of the Claude CLI connection">
+              <Circle
+                className={`w-2.5 h-2.5 ${
+                  kiloConnected
+                    ? 'fill-[color:var(--color-status-ready)] text-[color:var(--color-status-ready)]'
+                    : 'fill-border-strong text-border-strong'
+                }`}
+              />
+              <span className="text-[14px] text-muted">Kilo</span>
             </div>
             {/* Model selector */}
             <div ref={modelDropdownRef} className="relative">
@@ -934,6 +960,21 @@ export default function Home() {
               ) : (
                 <>
                   <Link2 className="w-4 h-4" /> Connect
+                </>
+              )}
+            </Button>
+            <Button
+              variant={kiloConnected ? 'secondary' : 'secondary'}
+              onClick={toggleKiloConnection}
+              title="Connect Kilo Code to the same pool (adds the 'claude-key-pool' provider to ~/.config/kilo/kilo.jsonc)"
+            >
+              {kiloConnected ? (
+                <>
+                  <Link2Off className="w-4 h-4" /> Kilo: off
+                </>
+              ) : (
+                <>
+                  <Link2 className="w-4 h-4" /> Kilo: on
                 </>
               )}
             </Button>
@@ -1278,12 +1319,21 @@ export default function Home() {
 
             {/* Guide card */}
             <div className="rounded-[10px] bg-surface-soft border border-hairline p-6 flex flex-col gap-2">
-              <h3 className="text-[16px] font-medium text-ink">Connecting Claude Code</h3>
+              <h3 className="text-[16px] font-medium text-ink">Connecting Claude Code &amp; Kilo Code</h3>
               <p className="text-[14px] text-body">
                 <span className="text-ink font-medium">Select a model</span> from the header dropdown, then click{' '}
                 <span className="text-ink font-medium">Connect</span> to sync your Claude CLI
                 settings.json automatically. Click{' '}
                 <span className="text-ink font-medium">Disconnect</span> to restore it.
+              </p>
+              <p className="text-[14px] text-body">
+                <span className="text-ink font-medium">Kilo: on</span> adds the provider{' '}
+                <span className="font-mono text-[13px]">claude-key-pool</span> (Anthropic format,
+                baseURL <span className="font-mono text-[13px]">http://127.0.0.1:9999/v1</span>) to{' '}
+                <span className="font-mono text-[13px]">~/.config/kilo/kilo.jsonc</span> — pick it in
+                Kilo&apos;s model selector. The two connections are independent: either, both, or
+                neither. <span className="text-ink font-medium">Kilo: off</span> removes the provider
+                and restores the rest of your Kilo config untouched.
               </p>
               <p className="text-[14px] text-body">
                 The <Zap className="w-3.5 h-3.5 inline-block -mt-0.5" /> dropdown picks the{' '}

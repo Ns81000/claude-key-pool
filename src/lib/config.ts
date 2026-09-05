@@ -29,6 +29,10 @@ export interface AppConfig {
   groups: GroupConfig[];
   isConnected: boolean;
   backupSettings: string | null;
+  // Kilo Code profile: independent of the Claude CLI one — both may be on,
+  // either alone, or neither. The pool serves the same /v1/messages route.
+  kiloConnected: boolean;
+  kiloBackupSettings: string | null;
 }
 
 // Key with live runtime status merged in — what the dashboard consumes.
@@ -66,6 +70,10 @@ const CONFIG_TMP_PATH = CONFIG_FILE_PATH + '.tmp';
 const CONFIG_BACKUP_PATH = path.join(process.cwd(), 'config.backup.json');
 const CLAUDE_SETTINGS_PATH =
   process.env.CLAUDE_SETTINGS_PATH || path.join(os.homedir(), '.claude', 'settings.json');
+// Kilo Code config. The extension reads JSONC (comments allowed), but it
+// round-trips whatever we write — we write plain JSON, which is valid JSONC.
+const KILO_SETTINGS_PATH =
+  process.env.KILO_SETTINGS_PATH || path.join(os.homedir(), '.config', 'kilo', 'kilo.jsonc');
 
 const DEFAULT_CONFIG: AppConfig = {
   activeGroupId: null,
@@ -74,6 +82,8 @@ const DEFAULT_CONFIG: AppConfig = {
   groups: [],
   isConnected: false,
   backupSettings: null,
+  kiloConnected: false,
+  kiloBackupSettings: null,
 };
 
 // Volatile runtime state — the source of truth for rotation while the server
@@ -158,6 +168,8 @@ function parseConfig(text: string): AppConfig {
     groups,
     isConnected: parsed.isConnected ?? false,
     backupSettings: parsed.backupSettings ?? null,
+    kiloConnected: (parsed as { kiloConnected?: boolean }).kiloConnected ?? false,
+    kiloBackupSettings: (parsed as { kiloBackupSettings?: string | null }).kiloBackupSettings ?? null,
   };
 }
 
@@ -427,6 +439,201 @@ export function mutateConfig(
 // version against this to detect stale snapshots.
 export function getConfigVersion(): number {
   return proxyState.configVersion;
+}
+
+// Kilo Code integration -----------------------------------------------------
+//
+// Kilo talks to the SAME pool (http://127.0.0.1:9999) — no separate proxy.
+// The config provider we inject is an Anthropic-format client pointing at
+// the pool's /v1/messages route; the pool rotates keys exactly as it does
+// for Claude Code. The profile is independent of the Claude CLI one: both
+// may be connected at once, either alone, or neither.
+
+// The provider id we own inside kilo.jsonc. Everything else in the file
+// (other providers, permissions, indexing, experimental flags) belongs to
+// the user and is never touched.
+const KILO_POOL_PROVIDER_ID = 'claude-key-pool';
+
+// Minimal JSONC stripper: removes // line comments and /* blocks */ outside
+// string literals, so the file can be compared and edited as JSON. Kilo
+// itself accepts plain JSON in this file, so writing back is safe.
+function parseKiloJsonc(text: string): Record<string, unknown> {
+  let out = '';
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      out += ch;
+      if (ch === '\\') {
+        out += text[i + 1] ?? '';
+        i++;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      out += ch;
+      continue;
+    }
+    if (ch === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+      continue;
+    }
+    if (ch === '/' && text[i + 1] === '*') {
+      i += 2;
+      while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i++;
+      i++; // consume the trailing slash of the block comment
+      continue;
+    }
+    out += ch;
+  }
+  return JSON.parse(out);
+}
+
+export function connectToKilo(config: AppConfig): AppConfig {
+  if (!fs.existsSync(KILO_SETTINGS_PATH)) {
+    throw new Error(`Kilo settings file not found at ${KILO_SETTINGS_PATH}`);
+  }
+
+  const originalContent = fs.readFileSync(KILO_SETTINGS_PATH, 'utf-8');
+  let kiloJson: Record<string, unknown>;
+  try {
+    kiloJson = parseKiloJsonc(originalContent);
+  } catch {
+    throw new Error('Kilo kilo.jsonc contains invalid JSON.');
+  }
+
+  if (!config.kiloConnected || !config.kiloBackupSettings) {
+    config.kiloBackupSettings = originalContent;
+  }
+
+  const providers = (kiloJson.provider as Record<string, unknown> | undefined) ?? {};
+  // Snapshot the existing pool provider's model list if the user customized
+  // it — reconnect must not silently drop their edits. First connect builds
+  // it from the pool's live groups.
+  let userModels: Record<string, unknown> | undefined;
+  const existing = providers[KILO_POOL_PROVIDER_ID] as
+    | { models?: Record<string, unknown> }
+    | undefined;
+  if (existing?.models && typeof existing.models === 'object') {
+    userModels = { ...existing.models };
+  }
+
+  const modelName = config.selectedModel || 'claude-opus-4-8';
+  // Same slot idea as the Claude CLI: the pool's enabled models become
+  // selectable models in Kilo; routing inside the pool is by request model.
+  const poolModels = config.groups
+    .filter((g) => !g.disabled && g.model)
+    .map((g) => g.model)
+    .filter((m): m is string => !!m);
+  const models: Record<string, unknown> = userModels ?? {};
+  if (!userModels) {
+    for (const m of poolModels.length > 0 ? poolModels : [modelName]) {
+      models[m] = { name: m, reasoning: true };
+    }
+  }
+
+  providers[KILO_POOL_PROVIDER_ID] = {
+    name: 'claude-key-pool',
+    npm: '@ai-sdk/anthropic',
+    options: {
+      baseURL: 'http://127.0.0.1:9999/v1',
+      // The pool replaces the client key with a rotated pool key; a dummy
+      // value is required by the SDK but never used for auth.
+      apiKey: 'sk-ant-dummy-rotated-by-key-pool-proxy-9999',
+      headers: {
+        // agentrouter rejects non-approved clients by User-Agent; Kilo's
+        // fetch cannot set it (forbidden header), so the pool masks it
+        // upstream-side anyway (buildUpstreamHeaders). The x-app marker
+        // mirrors what Claude Code sends.
+        'x-app': 'cli',
+      },
+    },
+    models,
+  };
+  kiloJson.provider = providers;
+
+  const tmp = KILO_SETTINGS_PATH + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(kiloJson, null, 2), 'utf-8');
+  fs.renameSync(tmp, KILO_SETTINGS_PATH);
+
+  config.kiloConnected = true;
+  return config;
+}
+
+export function disconnectFromKilo(config: AppConfig): AppConfig {
+  if (!fs.existsSync(KILO_SETTINGS_PATH)) {
+    throw new Error(`Kilo settings file not found at ${KILO_SETTINGS_PATH}`);
+  }
+
+  const currentContent = fs.readFileSync(KILO_SETTINGS_PATH, 'utf-8');
+  let kiloJson: Record<string, unknown>;
+  try {
+    kiloJson = parseKiloJsonc(currentContent);
+  } catch {
+    // Unparseable (user mid-edit?) — do not risk erasing the file; restore
+    // the backup verbatim only when it exists, else leave it alone.
+    if (!config.kiloBackupSettings) {
+      config.kiloConnected = false;
+      return config;
+    }
+    const tmp = KILO_SETTINGS_PATH + '.tmp';
+    fs.writeFileSync(tmp, config.kiloBackupSettings, 'utf-8');
+    fs.renameSync(tmp, KILO_SETTINGS_PATH);
+    config.kiloConnected = false;
+    config.kiloBackupSettings = null;
+    return config;
+  }
+
+  // Remove only OUR provider entry — every other provider and every other
+  // setting in the file stays as the user left it.
+  const providers = kiloJson.provider as Record<string, unknown> | undefined;
+  if (providers && KILO_POOL_PROVIDER_ID in providers) {
+    delete providers[KILO_POOL_PROVIDER_ID];
+    if (Object.keys(providers).length === 0) delete kiloJson.provider;
+
+    // Preserve the user's original file as far as possible: if the only
+    // difference from the backup is our provider entry, restore the backup
+    // verbatim (comments survive); otherwise write the edited JSON.
+    const backupJson = config.kiloBackupSettings ? safeParseKilo(config.kiloBackupSettings) : null;
+    const backupWithoutPool = backupJson ? removePoolProvider(backupJson) : null;
+    const currentWithoutPool = removePoolProvider(kiloJson);
+
+    const tmp = KILO_SETTINGS_PATH + '.tmp';
+    if (
+      backupWithoutPool &&
+      JSON.stringify(backupWithoutPool) === JSON.stringify(currentWithoutPool)
+    ) {
+      fs.writeFileSync(tmp, config.kiloBackupSettings!, 'utf-8');
+    } else {
+      fs.writeFileSync(tmp, JSON.stringify(kiloJson, null, 2), 'utf-8');
+    }
+    fs.renameSync(tmp, KILO_SETTINGS_PATH);
+  }
+
+  config.kiloConnected = false;
+  config.kiloBackupSettings = null;
+  return config;
+}
+
+function safeParseKilo(text: string): Record<string, unknown> | null {
+  try {
+    return parseKiloJsonc(text);
+  } catch {
+    return null;
+  }
+}
+
+function removePoolProvider(json: Record<string, unknown>): Record<string, unknown> {
+  const copy = { ...json };
+  const providers = copy.provider as Record<string, unknown> | undefined;
+  if (providers && KILO_POOL_PROVIDER_ID in providers) {
+    const { [KILO_POOL_PROVIDER_ID]: _removed, ...rest } = providers;
+    copy.provider = Object.keys(rest).length > 0 ? rest : undefined;
+  }
+  return copy;
 }
 
 // Claude CLI integration -----------------------------------------------------
