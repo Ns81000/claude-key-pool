@@ -33,6 +33,10 @@ export interface AppConfig {
   // either alone, or neither. The pool serves the same /v1/messages route.
   kiloConnected: boolean;
   kiloBackupSettings: string | null;
+  // The user's `disabled_providers` list as it was before connect — while
+  // the profile is on, every other provider is hidden from Kilo's model
+  // selector so only pool models are offered; disconnect restores it.
+  kiloDisabledBackup: string[] | null;
 }
 
 // Key with live runtime status merged in — what the dashboard consumes.
@@ -84,6 +88,7 @@ const DEFAULT_CONFIG: AppConfig = {
   backupSettings: null,
   kiloConnected: false,
   kiloBackupSettings: null,
+  kiloDisabledBackup: null,
 };
 
 // Volatile runtime state — the source of truth for rotation while the server
@@ -170,6 +175,7 @@ function parseConfig(text: string): AppConfig {
     backupSettings: parsed.backupSettings ?? null,
     kiloConnected: (parsed as { kiloConnected?: boolean }).kiloConnected ?? false,
     kiloBackupSettings: (parsed as { kiloBackupSettings?: string | null }).kiloBackupSettings ?? null,
+    kiloDisabledBackup: (parsed as { kiloDisabledBackup?: string[] | null }).kiloDisabledBackup ?? null,
   };
 }
 
@@ -555,6 +561,23 @@ export function connectToKilo(config: AppConfig): AppConfig {
   };
   kiloJson.provider = providers;
 
+  // While the profile is on, Kilo's model selector must offer ONLY pool
+  // models: every other provider goes into `disabled_providers` (hides them
+  // from the selector without deleting anything). The user's prior list is
+  // snapshotted and restored on disconnect. On reconnect the list is rebuilt
+  // from the current provider set — providers added/removed in Kilo while
+  // disconnected are picked up.
+  if (!config.kiloConnected || !config.kiloDisabledBackup) {
+    const existingDisabled = Array.isArray(kiloJson.disabled_providers)
+      ? (kiloJson.disabled_providers as unknown[]).filter((v): v is string => typeof v === 'string')
+      : [];
+    config.kiloDisabledBackup = existingDisabled;
+  }
+  const otherProviderIds = Object.keys(providers).filter((id) => id !== KILO_POOL_PROVIDER_ID);
+  kiloJson.disabled_providers = [
+    ...new Set([...config.kiloDisabledBackup, ...otherProviderIds]),
+  ];
+
   const tmp = KILO_SETTINGS_PATH + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(kiloJson, null, 2), 'utf-8');
   fs.renameSync(tmp, KILO_SETTINGS_PATH);
@@ -570,9 +593,14 @@ export function disconnectFromKilo(config: AppConfig): AppConfig {
 
   const currentContent = fs.readFileSync(KILO_SETTINGS_PATH, 'utf-8');
   let kiloJson: Record<string, unknown>;
+  let parsedOk = true;
   try {
     kiloJson = parseKiloJsonc(currentContent);
   } catch {
+    parsedOk = false;
+    kiloJson = {};
+  }
+  if (!parsedOk) {
     // Unparseable (user mid-edit?) — do not risk erasing the file; restore
     // the backup verbatim only when it exists, else leave it alone.
     if (!config.kiloBackupSettings) {
@@ -584,19 +612,48 @@ export function disconnectFromKilo(config: AppConfig): AppConfig {
     fs.renameSync(tmp, KILO_SETTINGS_PATH);
     config.kiloConnected = false;
     config.kiloBackupSettings = null;
+    config.kiloDisabledBackup = null;
     return config;
   }
 
   // Remove only OUR provider entry — every other provider and every other
-  // setting in the file stays as the user left it.
+  // setting in the file stays as the user left it. Even when the provider
+  // entry is already gone (user removed it manually), the
+  // disabled_providers list we hid the other providers in still needs
+  // restoring — otherwise they stay invisible in Kilo forever.
   const providers = kiloJson.provider as Record<string, unknown> | undefined;
-  if (providers && KILO_POOL_PROVIDER_ID in providers) {
-    delete providers[KILO_POOL_PROVIDER_ID];
-    if (Object.keys(providers).length === 0) delete kiloJson.provider;
+  // Snapshot the "was it there" facts BEFORE mutating: `changed` must
+  // reflect what the file contained, not what we just deleted from memory.
+  const poolProviderWasPresent = !!providers && KILO_POOL_PROVIDER_ID in providers;
+  const disabledFieldWasPresent = 'disabled_providers' in kiloJson;
 
+  if (poolProviderWasPresent) {
+    delete providers![KILO_POOL_PROVIDER_ID];
+    if (Object.keys(providers!).length === 0) delete kiloJson.provider;
+  }
+
+  // Restore the user's `disabled_providers` list: while the profile was
+  // on, every other provider id was hidden there. An empty restored list
+  // removes the field entirely (matches a user who never had one).
+  let disabledTouched = false;
+  if (config.kiloDisabledBackup !== null) {
+    if (config.kiloDisabledBackup.length > 0) {
+      kiloJson.disabled_providers = [...config.kiloDisabledBackup];
+      disabledTouched = true;
+    } else if (disabledFieldWasPresent) {
+      delete kiloJson.disabled_providers;
+      disabledTouched = true;
+    }
+  }
+
+  // Write only when something actually changed — a disconnect of an
+  // already-clean file must not rewrite it (comments would be lost).
+  const changed = poolProviderWasPresent || disabledTouched;
+  if (changed) {
     // Preserve the user's original file as far as possible: if the only
-    // difference from the backup is our provider entry, restore the backup
-    // verbatim (comments survive); otherwise write the edited JSON.
+    // difference from the backup is our provider entry (and the
+    // disabled_providers entries we added), restore the backup verbatim
+    // (comments survive); otherwise write the edited JSON.
     const backupJson = config.kiloBackupSettings ? safeParseKilo(config.kiloBackupSettings) : null;
     const backupWithoutPool = backupJson ? removePoolProvider(backupJson) : null;
     const currentWithoutPool = removePoolProvider(kiloJson);
@@ -615,6 +672,7 @@ export function disconnectFromKilo(config: AppConfig): AppConfig {
 
   config.kiloConnected = false;
   config.kiloBackupSettings = null;
+  config.kiloDisabledBackup = null;
   return config;
 }
 
@@ -632,6 +690,17 @@ function removePoolProvider(json: Record<string, unknown>): Record<string, unkno
   if (providers && KILO_POOL_PROVIDER_ID in providers) {
     const { [KILO_POOL_PROVIDER_ID]: _removed, ...rest } = providers;
     copy.provider = Object.keys(rest).length > 0 ? rest : undefined;
+  }
+  // Normalize disabled_providers the same way connect/disconnect do, so the
+  // backup-vs-current comparison is about the user's real edits, not about
+  // the pool's own bookkeeping in that field.
+  const disabled = copy.disabled_providers;
+  if (Array.isArray(disabled)) {
+    const rest = (disabled as unknown[]).filter(
+      (v) => typeof v === 'string' && v !== KILO_POOL_PROVIDER_ID,
+    ) as string[];
+    if (rest.length > 0) copy.disabled_providers = rest;
+    else delete copy.disabled_providers;
   }
   return copy;
 }
