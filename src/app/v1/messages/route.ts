@@ -96,12 +96,31 @@ export async function POST(req: NextRequest) {
   const rawBody = await req.arrayBuffer();
   let isStream = false;
   let model = 'unknown';
+  let parsed: { stream?: unknown; model?: unknown } | null = null;
   try {
-    const parsed = JSON.parse(new TextDecoder().decode(rawBody));
+    parsed = JSON.parse(new TextDecoder().decode(rawBody));
     isStream = parsed?.stream === true;
-    model = parsed?.model || 'unknown';
+    model = typeof parsed?.model === 'string' && parsed.model ? parsed.model : 'unknown';
   } catch {
     return errorJson('invalid_request_error', 'Failed to parse request JSON.', 400);
+  }
+
+  // The harness tags requested context size onto the model name (e.g.
+  // "glm-5.3[1m]" for the 1M-token window). The bracket suffix is a
+  // client-side label, not a model name: forwarded verbatim, the upstream
+  // rejects the unknown model, the request rotates through the pool and
+  // burns transient cooldowns on key after key (observed: 9/14 keys
+  // rate-limited by repeated classifier calls). Strip it for routing AND
+  // rewrite the forwarded body — only when a suffix is present, so normal
+  // bodies still go out byte-for-byte.
+  const normalizedModel =
+    typeof model === 'string' && /\[[^\]]*\]\s*$/.test(model)
+      ? model.replace(/\[[^\]]*\]\s*$/, '').trim()
+      : model;
+  let forwardBody: ArrayBuffer | string = rawBody;
+  if (parsed && normalizedModel !== model && normalizedModel) {
+    parsed.model = normalizedModel;
+    forwardBody = JSON.stringify(parsed);
   }
 
   logSeparator();
@@ -183,7 +202,7 @@ export async function POST(req: NextRequest) {
       upstream = await fetch(targetUrl, {
         method: 'POST',
         headers: buildUpstreamHeaders(req.headers, key.key),
-        body: rawBody,
+        body: forwardBody,
         signal: controller.signal,
       });
     } catch (err) {
