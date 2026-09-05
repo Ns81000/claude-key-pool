@@ -17,6 +17,7 @@ export interface GroupConfig {
   name: string;
   targetUrl: string;
   keys: KeyConfig[];
+  models?: string[];
   model?: string;
   rateLimitCooldownHours?: number;
   disabled?: boolean;
@@ -112,20 +113,31 @@ function readConfigFromDisk(): AppConfig {
         groups?: Array<Partial<GroupConfig> & { keys?: Array<Record<string, unknown>> }>;
       };
       // Migrate: strip any stats fields that may exist in an older config.json.
-      const groups: GroupConfig[] = (parsed.groups || []).map((g: any) => ({
-        id: String(g.id),
-        name: String(g.name ?? 'Untitled'),
-        targetUrl: String(g.targetUrl ?? ''),
-        model: typeof g.model === 'string' && g.model ? g.model : undefined,
-        rateLimitCooldownHours: typeof g.rateLimitCooldownHours === 'number' ? g.rateLimitCooldownHours : undefined,
-        disabled: g.disabled === true ? true : undefined,
-        keys: (g.keys || []).map((k: any) => ({
-          id: String(k.id),
-          email: String(k.email ?? ''),
-          key: String(k.key ?? ''),
-          disabled: k.disabled === true ? true : undefined,
-        })),
-      }));
+      const groups: GroupConfig[] = (parsed.groups || []).map((g: any) => {
+        const rawModels: unknown[] = Array.isArray(g.models)
+          ? g.models
+          : typeof g.model === 'string' && g.model
+            ? [g.model]
+            : [];
+        const models: string[] = Array.from(
+          new Set(rawModels.map((m: any) => String(m).trim()).filter(Boolean)),
+        );
+        return {
+          id: String(g.id),
+          name: String(g.name ?? 'Untitled'),
+          targetUrl: String(g.targetUrl ?? ''),
+          models: models.length > 0 ? models : undefined,
+          model: typeof g.model === 'string' && g.model ? g.model : undefined,
+          rateLimitCooldownHours: typeof g.rateLimitCooldownHours === 'number' ? g.rateLimitCooldownHours : undefined,
+          disabled: g.disabled === true ? true : undefined,
+          keys: (g.keys || []).map((k: any) => ({
+            id: String(k.id),
+            email: String(k.email ?? ''),
+            key: String(k.key ?? ''),
+            disabled: k.disabled === true ? true : undefined,
+          })),
+        };
+      });
       return {
         activeGroupId: parsed.activeGroupId ?? null,
         selectedModel: typeof parsed.selectedModel === 'string' ? parsed.selectedModel : null,

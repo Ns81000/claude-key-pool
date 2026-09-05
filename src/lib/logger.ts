@@ -192,7 +192,8 @@ export function logPoolStatus() {
       const gTotal = enabledKeys.length;
       const statusColor = gActive === gTotal ? GREEN : gActive > 0 ? YELLOW : RED;
       const disabledTag = gDisabled > 0 ? ` ${DIM}(${gDisabled} disabled)${RESET}` : '';
-      const modelTag = g.model ? ` ${DIM}[${g.model}]${RESET}` : '';
+      const modelList = g.models && g.models.length > 0 ? g.models : (g.model ? [g.model] : []);
+      const modelTag = modelList.length > 0 ? ` ${DIM}[${modelList.join(', ')}]${RESET}` : '';
       proxyLog('POOL', undefined, `  ${DIM}├─${RESET} ${g.name} ${statusColor}(${gActive}/${gTotal} active)${RESET}${disabledTag}${modelTag} → ${DIM}${g.targetUrl || '(no URL)'}${RESET}`);
     }
   } catch {

@@ -163,7 +163,10 @@ export function buildFlatPool(config: AppConfig, selectedModel?: string | null):
   const pool: FlatPoolEntry[] = [];
   for (const group of config.groups) {
     if (group.disabled) continue;
-    if (selectedModel && group.model !== selectedModel) continue;
+    if (selectedModel) {
+      const supportsModel = (group.models && group.models.includes(selectedModel)) || group.model === selectedModel;
+      if (!supportsModel) continue;
+    }
     for (const key of group.keys) {
       if (key.disabled) continue;
       pool.push({ group, key });

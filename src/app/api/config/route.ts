@@ -12,25 +12,35 @@ import {
 
 export const dynamic = 'force-dynamic';
 
-// Strip any runtime-only fields the client may echo back, keeping persisted shape.
 function sanitizeGroups(groups: unknown): GroupConfig[] {
   if (!Array.isArray(groups)) return [];
-  return groups.map((g: any) => ({
-    id: String(g.id),
-    name: String(g.name ?? 'Untitled'),
-    targetUrl: String(g.targetUrl ?? ''),
-    model: typeof g.model === 'string' && g.model ? g.model : undefined,
-    rateLimitCooldownHours: typeof g.rateLimitCooldownHours === 'number' ? g.rateLimitCooldownHours : undefined,
-    disabled: g.disabled === true ? true : undefined,
-    keys: Array.isArray(g.keys)
-      ? g.keys.map((k: Record<string, unknown>) => ({
-          id: String(k.id),
-          email: String(k.email ?? ''),
-          key: String(k.key ?? ''),
-          disabled: k.disabled === true ? true : undefined,
-        }))
-      : [],
-  }));
+  return groups.map((g: any) => {
+    const rawModels: unknown[] = Array.isArray(g.models)
+      ? g.models
+      : typeof g.model === 'string' && g.model
+        ? [g.model]
+        : [];
+    const models: string[] = Array.from(
+      new Set(rawModels.map((m: any) => String(m).trim()).filter(Boolean)),
+    );
+    return {
+      id: String(g.id),
+      name: String(g.name ?? 'Untitled'),
+      targetUrl: String(g.targetUrl ?? ''),
+      models: models.length > 0 ? models : undefined,
+      model: typeof g.model === 'string' && g.model ? g.model : undefined,
+      rateLimitCooldownHours: typeof g.rateLimitCooldownHours === 'number' ? g.rateLimitCooldownHours : undefined,
+      disabled: g.disabled === true ? true : undefined,
+      keys: Array.isArray(g.keys)
+        ? g.keys.map((k: Record<string, unknown>) => ({
+            id: String(k.id),
+            email: String(k.email ?? ''),
+            key: String(k.key ?? ''),
+            disabled: k.disabled === true ? true : undefined,
+          }))
+        : [],
+    };
+  });
 }
 
 export async function GET() {

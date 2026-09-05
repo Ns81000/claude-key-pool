@@ -15,6 +15,7 @@ import {
   Activity,
   Ban,
   ChevronDown,
+  Search,
 } from 'lucide-react';
 import type { AppConfigView, GroupView, KeyView, PoolStats } from '@/lib/config';
 
@@ -338,11 +339,12 @@ export default function Home() {
   const [showNewGroup, setShowNewGroup] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
   const [newGroupUrl, setNewGroupUrl] = useState('');
-  const [newGroupModel, setNewGroupModel] = useState('');
 
   const [newKeyEmail, setNewKeyEmail] = useState('');
   const [newKeyValue, setNewKeyValue] = useState('');
+  const [newModelInput, setNewModelInput] = useState('');
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
+  const [modelSearch, setModelSearch] = useState('');
   const modelDropdownRef = useRef<HTMLDivElement>(null);
   const urlDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -428,14 +430,58 @@ export default function Home() {
     [config, post],
   );
 
-  const availableModels = useMemo(() => {
+  interface AggregatedModel {
+    name: string;
+    groups: { id: string; name: string; activeKeys: number; totalKeys: number }[];
+    totalActiveKeys: number;
+    totalKeys: number;
+  }
+
+  const aggregatedModels = useMemo(() => {
     if (!config) return [];
-    const models = new Set<string>();
+    const map = new Map<string, { groups: { id: string; name: string; activeKeys: number; totalKeys: number }[]; totalActiveKeys: number; totalKeys: number }>();
+
     for (const g of config.groups) {
-      if (g.model) models.add(g.model);
+      if (g.disabled) continue;
+      const groupModels = g.models && g.models.length > 0 ? g.models : (g.model ? [g.model] : []);
+      const enabledKeys = g.keys.filter((k) => !k.disabled);
+      const activeKeys = enabledKeys.filter((k) => k.status === 'active').length;
+      const totalKeys = enabledKeys.length;
+
+      for (const m of groupModels) {
+        const trimmed = m.trim();
+        if (!trimmed) continue;
+        if (!map.has(trimmed)) {
+          map.set(trimmed, { groups: [], totalActiveKeys: 0, totalKeys: 0 });
+        }
+        const entry = map.get(trimmed)!;
+        entry.groups.push({ id: g.id, name: g.name, activeKeys, totalKeys });
+        entry.totalActiveKeys += activeKeys;
+        entry.totalKeys += totalKeys;
+      }
     }
-    return Array.from(models).sort();
+
+    const list: AggregatedModel[] = [];
+    for (const [name, data] of map.entries()) {
+      list.push({
+        name,
+        groups: data.groups,
+        totalActiveKeys: data.totalActiveKeys,
+        totalKeys: data.totalKeys,
+      });
+    }
+    return list.sort((a, b) => a.name.localeCompare(b.name));
   }, [config]);
+
+  const filteredModels = useMemo(() => {
+    const query = modelSearch.trim().toLowerCase();
+    if (!query) return aggregatedModels;
+    return aggregatedModels.filter(
+      (m) =>
+        m.name.toLowerCase().includes(query) ||
+        m.groups.some((g) => g.name.toLowerCase().includes(query))
+    );
+  }, [aggregatedModels, modelSearch]);
 
   const setSelectedModel = async (model: string | null) => {
     try {
@@ -481,14 +527,13 @@ export default function Home() {
       id: genId('group'),
       name: newGroupName.trim(),
       targetUrl: newGroupUrl.trim().replace(/\/$/, ''),
-      model: newGroupModel.trim() || undefined,
+      models: [],
       keys: [],
     };
     try {
       await saveGroups([...config.groups, group], config.activeGroupId || group.id);
       setNewGroupName('');
       setNewGroupUrl('');
-      setNewGroupModel('');
       setShowNewGroup(false);
       pushToast(`Group "${group.name}" created`);
     } catch (err) {
@@ -548,18 +593,79 @@ export default function Home() {
     }, 600);
   };
 
-  const modelDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const updateGroupModel = (groupId: string, model: string) => {
+  const addModelToGroup = async (groupId: string, modelStr: string) => {
     if (!config) return;
-    const groups = config.groups.map((g) => (g.id === groupId ? { ...g, model: model || undefined } : g));
-    setConfig({ ...config, groups });
-    if (modelDebounce.current) clearTimeout(modelDebounce.current);
-    modelDebounce.current = setTimeout(() => {
-      saveGroups(groups).catch(
-        (err) => pushToast(err instanceof Error ? err.message : 'Error', 'error'),
-      );
-    }, 600);
+    const items = modelStr
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (items.length === 0) return;
+
+    const group = config.groups.find((g) => g.id === groupId);
+    if (!group) return;
+
+    const currentModels =
+      group.models && group.models.length > 0
+        ? [...group.models]
+        : group.model
+          ? [group.model]
+          : [];
+
+    const added: string[] = [];
+    for (const item of items) {
+      if (!currentModels.includes(item)) {
+        currentModels.push(item);
+        added.push(item);
+      }
+    }
+
+    if (added.length === 0) {
+      pushToast('Model(s) already added to this group', 'error');
+      return;
+    }
+
+    const updatedGroups = config.groups.map((g) =>
+      g.id === groupId ? { ...g, models: currentModels, model: currentModels[0] } : g
+    );
+
+    try {
+      await saveGroups(updatedGroups);
+      setNewModelInput('');
+      pushToast(`Added ${added.length === 1 ? added[0] : `${added.length} models`}`);
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : 'Error', 'error');
+    }
+  };
+
+  const removeModelFromGroup = async (groupId: string, modelToRemove: string) => {
+    if (!config) return;
+    const group = config.groups.find((g) => g.id === groupId);
+    if (!group) return;
+
+    const currentModels =
+      group.models && group.models.length > 0
+        ? group.models
+        : group.model
+          ? [group.model]
+          : [];
+
+    const remaining = currentModels.filter((m) => m !== modelToRemove);
+    const updatedGroups = config.groups.map((g) =>
+      g.id === groupId
+        ? {
+            ...g,
+            models: remaining.length > 0 ? remaining : undefined,
+            model: remaining[0] || undefined,
+          }
+        : g
+    );
+
+    try {
+      await saveGroups(updatedGroups);
+      pushToast(`Removed ${modelToRemove}`);
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : 'Error', 'error');
+    }
   };
 
   const addKey = async (e: React.FormEvent) => {
@@ -754,46 +860,127 @@ export default function Home() {
             {/* Model selector */}
             <div ref={modelDropdownRef} className="relative">
               <button
-                onClick={() => setModelDropdownOpen((v) => !v)}
-                className={`inline-flex items-center gap-2 h-10 px-3.5 rounded-[10px] border text-[13px] font-medium transition-colors cursor-pointer ${
+                onClick={() => {
+                  setModelDropdownOpen((v) => !v);
+                  setModelSearch('');
+                }}
+                className={`inline-flex items-center gap-2 h-10 px-3.5 rounded-[10px] border text-[13px] font-medium transition-all active:scale-[0.98] cursor-pointer ${
                   config?.selectedModel
-                    ? 'border-hairline bg-surface-soft text-ink hover:border-border-strong'
+                    ? 'border-hairline bg-surface-soft text-ink hover:border-border-strong shadow-xs'
                     : 'border-[color:var(--color-status-limited)] bg-[color:var(--color-status-limited-bg)] text-[color:var(--color-status-limited)]'
                 }`}
+                title={config?.selectedModel ? `Active model: ${config.selectedModel}` : 'No model selected'}
               >
-                <span className="truncate max-w-[180px]">
+                <span className="font-mono truncate max-w-[190px]">
                   {config?.selectedModel || 'Select model'}
                 </span>
-                <ChevronDown className={`w-3.5 h-3.5 shrink-0 transition-transform ${modelDropdownOpen ? 'rotate-180' : ''}`} />
+                <ChevronDown
+                  className={`w-3.5 h-3.5 shrink-0 transition-transform duration-150 ${
+                    modelDropdownOpen ? 'rotate-180' : ''
+                  }`}
+                />
               </button>
+
               {modelDropdownOpen && (
-                <div className="absolute top-full right-0 mt-1.5 min-w-[220px] bg-canvas border border-hairline rounded-[10px] shadow-lg py-1.5 z-50">
-                  {availableModels.length === 0 ? (
-                    <div className="px-4 py-3 text-[13px] text-muted">
-                      No models configured. Add a model to a group first.
-                    </div>
-                  ) : (
-                    availableModels.map((m) => (
+                <div className="absolute top-full right-0 mt-2 w-[330px] sm:w-[380px] bg-canvas border border-hairline rounded-[12px] shadow-xl overflow-hidden z-50 origin-top-right transition-all animate-in fade-in zoom-in-95 duration-150">
+                  {/* Search bar */}
+                  <div className="p-2.5 border-b border-hairline bg-surface-soft flex items-center gap-2">
+                    <Search className="w-3.5 h-3.5 text-muted shrink-0" />
+                    <input
+                      type="text"
+                      value={modelSearch}
+                      onChange={(e) => setModelSearch(e.target.value)}
+                      placeholder="Search models or groups..."
+                      className="w-full text-[13px] bg-transparent text-ink placeholder:text-muted/60 outline-none"
+                      autoFocus
+                    />
+                    {modelSearch && (
                       <button
-                        key={m}
+                        onClick={() => setModelSearch('')}
+                        className="text-muted hover:text-ink p-0.5 rounded cursor-pointer"
+                        title="Clear search"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Model items */}
+                  <div className="max-h-[320px] overflow-y-auto p-1.5 flex flex-col gap-1">
+                    {aggregatedModels.length === 0 ? (
+                      <div className="px-4 py-6 text-center text-[13px] text-muted">
+                        No models configured yet. Add models in a group below.
+                      </div>
+                    ) : filteredModels.length === 0 ? (
+                      <div className="px-4 py-6 text-center text-[13px] text-muted">
+                        No models match &ldquo;{modelSearch}&rdquo;
+                      </div>
+                    ) : (
+                      filteredModels.map((m) => {
+                        const isSelected = config?.selectedModel === m.name;
+                        return (
+                          <button
+                            key={m.name}
+                            onClick={() => {
+                              setSelectedModel(m.name);
+                              setModelDropdownOpen(false);
+                            }}
+                            className={`w-full text-left p-2.5 rounded-[8px] transition-all cursor-pointer flex items-start justify-between gap-3 group active:scale-[0.99] ${
+                              isSelected
+                                ? 'bg-surface-soft border border-hairline'
+                                : 'hover:bg-surface-soft border border-transparent'
+                            }`}
+                          >
+                            <div className="flex flex-col gap-1.5 min-w-0 flex-1">
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono text-[13px] font-medium text-ink truncate">
+                                  {m.name}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                {m.groups.map((g) => (
+                                  <span
+                                    key={g.id}
+                                    className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-sans font-medium bg-surface-strong/50 text-muted border border-hairline/60 truncate max-w-[130px]"
+                                    title={`${g.name} (${g.activeKeys}/${g.totalKeys} keys active)`}
+                                  >
+                                    {g.name}
+                                  </span>
+                                ))}
+                                <span className="text-[11px] text-muted ml-auto shrink-0">
+                                  {m.totalActiveKeys} active key{m.totalActiveKeys === 1 ? '' : 's'}
+                                </span>
+                              </div>
+                            </div>
+                            <div className="pt-0.5 shrink-0">
+                              {isSelected ? (
+                                <Check className="w-4 h-4 text-[color:var(--color-status-ready)]" />
+                              ) : (
+                                <div className="w-4 h-4 rounded-full border border-hairline group-hover:border-border-strong transition-colors" />
+                              )}
+                            </div>
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+
+                  {/* Footer actions */}
+                  {config?.selectedModel && (
+                    <div className="p-2 border-t border-hairline bg-surface-soft/40 flex items-center justify-between text-[12px]">
+                      <span className="text-muted font-mono text-[11px] truncate max-w-[200px]">
+                        Active: {config.selectedModel}
+                      </span>
+                      <button
                         onClick={() => {
-                          setSelectedModel(m);
+                          setSelectedModel(null);
                           setModelDropdownOpen(false);
                         }}
-                        className={`w-full text-left px-4 py-2 text-[13px] transition-colors cursor-pointer ${
-                          config?.selectedModel === m
-                            ? 'bg-surface-soft text-ink font-medium'
-                            : 'text-body hover:bg-surface-soft'
-                        }`}
+                        className="text-[color:var(--color-status-invalid)] hover:underline font-medium cursor-pointer"
                       >
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="truncate">{m}</span>
-                          {config?.selectedModel === m && (
-                            <Check className="w-3.5 h-3.5 text-[color:var(--color-status-ready)] shrink-0" />
-                          )}
-                        </div>
+                        Clear active model
                       </button>
-                    ))
+                    </div>
                   )}
                 </div>
               )}
@@ -860,13 +1047,6 @@ export default function Home() {
                   onChange={(e) => setNewGroupUrl(e.target.value)}
                   mono
                   required
-                  {...noAutofill}
-                />
-                <TextInput
-                  placeholder="Model (e.g. claude-opus-4-8)"
-                  value={newGroupModel}
-                  onChange={(e) => setNewGroupModel(e.target.value)}
-                  mono
                   {...noAutofill}
                 />
                 <div className="flex gap-2">
@@ -982,11 +1162,36 @@ export default function Home() {
                           </>
                         )}
                       </div>
-                      {group.model && (
-                        <div className="ml-4 mt-0.5">
-                          <span className="text-[11px] font-mono text-muted/70 truncate block max-w-[200px]">{group.model}</span>
-                        </div>
-                      )}
+                      {(() => {
+                        const groupModels =
+                          group.models && group.models.length > 0
+                            ? group.models
+                            : group.model
+                              ? [group.model]
+                              : [];
+                        if (groupModels.length === 0) return null;
+                        return (
+                          <div className="ml-4 mt-1 flex items-center gap-1.5 flex-wrap">
+                            {groupModels.slice(0, 2).map((m) => (
+                              <span
+                                key={m}
+                                className={`text-[10px] font-mono px-1.5 py-0.5 rounded border truncate max-w-[130px] ${
+                                  config?.selectedModel === m
+                                    ? 'bg-[color:var(--color-status-ready-bg)] border-[color:var(--color-status-ready)]/40 text-ink font-medium'
+                                    : 'bg-surface-soft border-hairline text-muted'
+                                }`}
+                              >
+                                {m}
+                              </span>
+                            ))}
+                            {groupModels.length > 2 && (
+                              <span className="text-[10px] text-muted font-mono">
+                                +{groupModels.length - 2}
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </div>
                   );
                 })}
@@ -1033,14 +1238,105 @@ export default function Home() {
                     {...noAutofill}
                   />
 
-                  <label className="text-[13px] font-medium text-muted mt-2">Model</label>
-                  <TextInput
-                    value={activeGroup.model ?? ''}
-                    onChange={(e) => updateGroupModel(activeGroup.id, e.target.value)}
-                    placeholder="e.g. claude-opus-4-8"
-                    mono
-                    {...noAutofill}
-                  />
+                  {/* Supported Models Section */}
+                  <div className="flex flex-col gap-2.5 mt-2">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <label className="text-[13px] font-medium text-ink">Supported Models</label>
+                        <p className="text-[12px] text-muted mt-0.5">
+                          Requests for any of these models will pool keys from this group.
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Chips list */}
+                    {(() => {
+                      const currentModels =
+                        activeGroup.models && activeGroup.models.length > 0
+                          ? activeGroup.models
+                          : activeGroup.model
+                            ? [activeGroup.model]
+                            : [];
+
+                      if (currentModels.length === 0) {
+                        return (
+                          <div className="p-3 rounded-[10px] border border-dashed border-hairline bg-surface-soft/40 text-[13px] text-muted">
+                            No models configured for this group. Add one below to enable routing for this group.
+                          </div>
+                        );
+                      }
+
+                      return (
+                        <div className="flex flex-wrap gap-2">
+                          {currentModels.map((m) => {
+                            const isActive = config?.selectedModel === m;
+                            return (
+                              <div
+                                key={m}
+                                className={`inline-flex items-center gap-2 pl-3 pr-1.5 py-1.5 rounded-[10px] border text-[13px] font-mono transition-all ${
+                                  isActive
+                                    ? 'bg-[color:var(--color-status-ready-bg)] border-[color:var(--color-status-ready)]/40 text-ink font-medium shadow-xs'
+                                    : 'bg-surface-soft border-hairline text-ink hover:border-border-strong'
+                                }`}
+                              >
+                                <span>{m}</span>
+                                {isActive ? (
+                                  <span className="inline-flex items-center gap-1 text-[11px] font-sans font-medium text-[color:var(--color-status-ready)] bg-canvas px-1.5 py-0.5 rounded border border-[color:var(--color-status-ready)]/30">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-[color:var(--color-status-ready)]" />
+                                    Active
+                                  </span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => setSelectedModel(m)}
+                                    className="text-[11px] font-sans font-medium text-muted hover:text-ink px-1.5 py-0.5 rounded hover:bg-canvas border border-transparent hover:border-hairline transition-colors cursor-pointer"
+                                    title="Set as active header model"
+                                  >
+                                    Set active
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => removeModelFromGroup(activeGroup.id, m)}
+                                  className="w-5 h-5 rounded flex items-center justify-center text-muted hover:text-[color:var(--color-status-invalid)] hover:bg-canvas transition-colors cursor-pointer"
+                                  title={`Remove ${m}`}
+                                  aria-label={`Remove ${m}`}
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })()}
+
+                    {/* Add model input */}
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        addModelToGroup(activeGroup.id, newModelInput);
+                      }}
+                      className="flex gap-2 mt-1"
+                    >
+                      <TextInput
+                        placeholder="Add model (e.g. claude-opus-4-8, or comma-separated)"
+                        value={newModelInput}
+                        onChange={(e) => setNewModelInput(e.target.value)}
+                        mono
+                        className="flex-1"
+                        {...noAutofill}
+                      />
+                      <Button
+                        type="submit"
+                        variant="secondary"
+                        disabled={!newModelInput.trim()}
+                        className="shrink-0 text-[13px] px-4"
+                      >
+                        <Plus className="w-3.5 h-3.5" /> Add
+                      </Button>
+                    </form>
+                  </div>
                 </div>
 
                 {/* Add a key */}
