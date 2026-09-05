@@ -241,6 +241,10 @@ export class RequestTracker {
   attempts = 0;
   inputTokens: number | null = null;
   outputTokens: number | null = null;
+  // Token values already accumulated into per-key stats by addTokens() —
+  // the delta base that prevents double-counting repeated usage frames.
+  private prevStatIn: number | null = null;
+  private prevStatOut: number | null = null;
   private lastKeyId: string | null = null;
   private lastKeyEmail: string | null = null;
   private lastGroupName: string | null = null;
@@ -266,8 +270,12 @@ export class RequestTracker {
   // Record token usage. Safe at any point of the request lifecycle:
   // before finish() it lands in the entry being built, after finish()
   // (streaming — usage only becomes known when the stream ends) it also
-  // patches the already-pushed log entry. Always accumulates into the
-  // per-key stats.
+  // patches the already-pushed log entry.
+  //
+  // Cumulative per-key stats take the DELTA from the last recorded value,
+  // not the raw number: some relays repeat usage in both message_start and
+  // the final message_delta, and summing both would double-count every
+  // request. The log entry always shows the latest (largest) value.
   addTokens(inputTokens: number | null, outputTokens: number | null): void {
     const inT = typeof inputTokens === 'number' ? inputTokens : null;
     const outT = typeof outputTokens === 'number' ? outputTokens : null;
@@ -276,8 +284,10 @@ export class RequestTracker {
     if (this.lastKeyId) {
       const st = state.keyStats[this.lastKeyId];
       if (st && (inT !== null || outT !== null)) {
-        if (inT !== null) st.inputTokens += inT;
-        if (outT !== null) st.outputTokens += outT;
+        if (inT !== null) st.inputTokens += Math.max(0, inT - (this.prevStatIn ?? 0));
+        if (outT !== null) st.outputTokens += Math.max(0, outT - (this.prevStatOut ?? 0));
+        if (inT !== null) this.prevStatIn = Math.max(this.prevStatIn ?? 0, inT);
+        if (outT !== null) this.prevStatOut = Math.max(this.prevStatOut ?? 0, outT);
         scheduleStatsSave();
       }
     }
@@ -355,6 +365,19 @@ export class RequestTracker {
       state.entries.length = LOG_BUFFER_SIZE;
     }
   }
+
+  // Rewrite the outcome of an already-finished entry. Used by streaming
+  // responses: the route commits `success` when the 200 head is decided, but
+  // the real outcome becomes known only when the stream ends — a stream that
+  // dies mid-body must not sit in the log as a green OK. No-op before
+  // finish() or on a fresh tracker.
+  rewriteOutcome(outcome: RequestOutcome, httpStatus: number | null, note?: string): void {
+    if (!this.finished || !this.entry) return;
+    this.entry.outcome = outcome;
+    this.entry.httpStatus = httpStatus;
+    this.entry.durationMs = Date.now() - this.startedAt;
+    if (note !== undefined) this.entry.note = note;
+  }
 }
 
 export function startRequest(reqId: number, method: string, path: string): RequestTracker {
@@ -403,7 +426,11 @@ export function clearActivityLog(): void {
   state.entries = [];
 }
 
-// Wipe cumulative key stats (memory + stats.json). Irreversible.
+// Wipe cumulative key stats (memory + stats.json). Irreversible. If the
+// unlink fails (EPERM from an indexer / AV holding the file), rewrite the
+// file with the now-empty stats instead: `loaded` stays true so a later
+// lazy load would not re-read it, but a fresh process must not resurrect
+// the wiped counters from the stale file.
 export function resetKeyStats(): void {
   state.keyStats = {};
   if (state.saveTimer) {
@@ -413,6 +440,19 @@ export function resetKeyStats(): void {
   try {
     if (fs.existsSync(STATS_FILE_PATH)) fs.unlinkSync(STATS_FILE_PATH);
   } catch (error) {
-    console.error('Failed to remove stats.json:', error);
+    console.error('Failed to remove stats.json, rewriting it empty:', error);
+    persistStats();
   }
+}
+
+// Flush pending stats synchronously. Called on server shutdown: the save
+// timer is unref'd and debounced for 5s, so without this the last few
+// seconds of statistics (tokens of streams that just ended, late successes)
+// would be lost to process.exit().
+export function flushStatsNow(): void {
+  if (state.saveTimer) {
+    clearTimeout(state.saveTimer);
+    state.saveTimer = null;
+  }
+  if (state.loaded) persistStats();
 }

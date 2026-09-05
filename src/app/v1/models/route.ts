@@ -39,10 +39,15 @@ import {
   nextRequestId,
 } from '@/lib/logger';
 import { startRequest } from '@/lib/activity';
+import { rejectCrossSiteRequest } from '@/lib/localGuard';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
+  // Cross-site guard (DNS-rebinding / drive-by): transparent for curl/CLI.
+  const crossSiteRejected = rejectCrossSiteRequest(req);
+  if (crossSiteRejected) return crossSiteRejected;
+
   const config = loadConfig();
   const reqId = nextRequestId();
   const startTime = Date.now();
@@ -262,7 +267,21 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    const textBody = await upstream.text();
+    // The body read can throw (headers 200, then the connection died
+    // mid-body): without a catch the inFlight counter leaks forever and the
+    // tracker never finishes — treat it like a transient upstream failure.
+    let textBody: string;
+    try {
+      textBody = await upstream.text();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      markProviderError(key.id);
+      decrementInFlight(key.id);
+      totalTransientFailures++;
+      act.note(key.id, key.email, group.name, 'provider-error', `body read failed: ${message}`);
+      logRotation(reqId, key.email, `Body read failed: ${message} → provider error (5-min cooldown)`);
+      continue;
+    }
     const validation = validateNonStreamingResponseBody(textBody);
     if (!validation.valid) {
       markProviderError(key.id);

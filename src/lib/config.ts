@@ -378,8 +378,31 @@ export function saveConfig(config: AppConfig): Promise<void> {
 // two dashboard tabs). Here the read, the mutation, and the write all run
 // inside the chain as one step. `mutate` edits the config in place; a throw
 // propagates to the caller without writing, and the chain survives.
-export function mutateConfig(mutate: (config: AppConfig) => void): Promise<AppConfig> {
+//
+// `expectedVersion` (optional): when the action's payload is a full snapshot
+// taken from an older state, the optimistic-concurrency check must run
+// INSIDE the chain step — checking before enqueueing leaves a TOCTOU window
+// where another tab's write lands between the check and this step's turn.
+// A version mismatch throws `StaleConfigVersionError` → the caller answers
+// 409.
+export class StaleConfigVersionError extends Error {
+  constructor(expected: number, actual: number) {
+    super(`Configuration was changed by another tab or action (expected version ${expected}, current ${actual})`);
+    this.name = 'StaleConfigVersionError';
+  }
+}
+
+export function mutateConfig(
+  mutate: (config: AppConfig) => void,
+  expectedVersion?: number,
+): Promise<AppConfig> {
   const run = proxyState.writeChain.then(() => {
+    if (
+      typeof expectedVersion === 'number' &&
+      expectedVersion !== proxyState.configVersion
+    ) {
+      throw new StaleConfigVersionError(expectedVersion, proxyState.configVersion);
+    }
     const config = loadConfig();
     mutate(config);
     writeConfigAtomic(config);
@@ -473,8 +496,63 @@ export function disconnectFromClaude(config: AppConfig): AppConfig {
 
   const tmp = CLAUDE_SETTINGS_PATH + '.tmp';
   if (config.backupSettings) {
-    fs.writeFileSync(tmp, config.backupSettings, 'utf-8');
-    fs.renameSync(tmp, CLAUDE_SETTINGS_PATH);
+    // The backup is a verbatim pre-connect snapshot. The user may have edited
+    // settings.json while the pool was connected (permissions, hooks, new
+    // models) — restoring the snapshot verbatim would erase those edits
+    // silently. Detect foreign edits by comparing the current file with the
+    // pool's own deterministic transformation of the backup (connect strips
+    // apiKeyHelper/ANTHROPIC_AUTH_TOKEN and writes a known set of pool env
+    // fields); anything else in the current file that differs from the
+    // backup is user work and must survive.
+    const currentContent = fs.readFileSync(CLAUDE_SETTINGS_PATH, 'utf-8');
+    const untouched = poolUnrelatedSettingsEqual(config.backupSettings, currentContent);
+    if (untouched) {
+      // Nothing foreign changed — safe to restore the snapshot verbatim.
+      fs.writeFileSync(tmp, config.backupSettings, 'utf-8');
+      fs.renameSync(tmp, CLAUDE_SETTINGS_PATH);
+    } else {
+      // Foreign edits present: strip the pool's own fields from the CURRENT
+      // file (keeping everything the user added) and keep a copy of the
+      // current state next to the file so nothing is lost either way.
+      try {
+        fs.writeFileSync(CLAUDE_SETTINGS_PATH + '.pre-disconnect', currentContent, 'utf-8');
+      } catch {
+        /* best-effort safety copy */
+      }
+      const settingsJson = JSON.parse(currentContent) as {
+        env?: Record<string, string>;
+        model?: unknown;
+        effortLevel?: unknown;
+        apiKeyHelper?: unknown;
+      };
+      if (settingsJson.env) {
+        delete settingsJson.env.ANTHROPIC_BASE_URL;
+        delete settingsJson.env.ANTHROPIC_API_KEY;
+        delete settingsJson.env.ANTHROPIC_AUTH_TOKEN;
+        delete settingsJson.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;
+        for (const name of [
+          'ANTHROPIC_DEFAULT_OPUS_MODEL',
+          'ANTHROPIC_DEFAULT_SONNET_MODEL',
+          'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+          'ANTHROPIC_DEFAULT_FABLE_MODEL',
+          'ANTHROPIC_SMALL_FAST_MODEL',
+          'CLAUDE_CODE_EFFORT_LEVEL',
+        ]) {
+          delete settingsJson.env[name];
+        }
+        if (Object.keys(settingsJson.env).length === 0) delete settingsJson.env;
+      }
+      delete settingsJson.model;
+      delete settingsJson.effortLevel;
+      delete settingsJson.apiKeyHelper;
+      fs.writeFileSync(tmp, JSON.stringify(settingsJson, null, 2), 'utf-8');
+      fs.renameSync(tmp, CLAUDE_SETTINGS_PATH);
+      console.warn(
+        '[claude-key-pool] settings.json was edited outside the pool while connected — ' +
+          'Disconnect kept your edits and removed only the pool fields; ' +
+          `the pre-disconnect file was saved as ${CLAUDE_SETTINGS_PATH}.pre-disconnect`,
+      );
+    }
   } else {
     // Bug #7 fix: fallback to official Anthropic API, not a third-party domain.
     const content = fs.readFileSync(CLAUDE_SETTINGS_PATH, 'utf-8');
@@ -496,6 +574,7 @@ export function disconnectFromClaude(config: AppConfig): AppConfig {
         'ANTHROPIC_DEFAULT_HAIKU_MODEL',
         'ANTHROPIC_DEFAULT_FABLE_MODEL',
         'ANTHROPIC_SMALL_FAST_MODEL',
+        'CLAUDE_CODE_EFFORT_LEVEL',
       ]) {
         delete settingsJson.env[name];
       }
@@ -513,4 +592,67 @@ export function disconnectFromClaude(config: AppConfig): AppConfig {
   config.isConnected = false;
   config.backupSettings = null;
   return config;
+}
+
+// Fields connectToClaude owns in ~/.claude/settings.json. Everything else in
+// the file belongs to the user.
+const POOL_SETTINGS_ENV_KEYS = [
+  'ANTHROPIC_BASE_URL',
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
+  'CLAUDE_CODE_EFFORT_LEVEL',
+  'ANTHROPIC_DEFAULT_OPUS_MODEL',
+  'ANTHROPIC_DEFAULT_SONNET_MODEL',
+  'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+  'ANTHROPIC_DEFAULT_FABLE_MODEL',
+  'ANTHROPIC_SMALL_FAST_MODEL',
+];
+
+// True when the current settings.json differs from the pre-connect backup
+// only in fields the pool itself writes. Compare parsed JSON (not bytes):
+// connectToClaude re-serializes the whole file, so key order and whitespace
+// change even when nothing semantic did.
+function poolUnrelatedSettingsEqual(backup: string, current: string): boolean {
+  let backupJson: Record<string, unknown>;
+  let currentJson: Record<string, unknown>;
+  try {
+    backupJson = JSON.parse(backup);
+    currentJson = JSON.parse(current);
+  } catch {
+    // Unparseable current file (user mid-edit?) — do not risk erasing it.
+    return false;
+  }
+
+  // The pool may DELETE apiKeyHelper / ANTHROPIC_AUTH_TOKEN on connect —
+  // mirror that on the backup side before comparing.
+  const backupEnv = { ...(backupJson.env as Record<string, unknown> | undefined) };
+  const currentEnv = { ...(currentJson.env as Record<string, unknown> | undefined) };
+  if ('apiKeyHelper' in backupJson && !('apiKeyHelper' in currentJson)) delete backupJson.apiKeyHelper;
+  if (backupEnv && 'ANTHROPIC_AUTH_TOKEN' in backupEnv && currentEnv && !('ANTHROPIC_AUTH_TOKEN' in currentEnv)) {
+    delete backupEnv.ANTHROPIC_AUTH_TOKEN;
+  }
+
+  for (const key of POOL_SETTINGS_ENV_KEYS) delete backupEnv[key];
+  for (const key of POOL_SETTINGS_ENV_KEYS) delete currentEnv[key];
+
+  const stripPoolFields = (obj: Record<string, unknown>): Record<string, unknown> => {
+    const copy = { ...obj };
+    if (copy.env !== undefined) {
+      copy.env = Object.keys(copy.env as Record<string, unknown>).length > 0
+        ? copy.env
+        : {};
+    }
+    return copy;
+  };
+
+  // Top-level pool fields.
+  const backupTop = { ...stripPoolFields(backupJson) };
+  const currentTop = { ...stripPoolFields(currentJson) };
+  delete backupTop.model;
+  delete currentTop.model;
+  delete backupTop.effortLevel;
+  delete currentTop.effortLevel;
+
+  return JSON.stringify(backupTop) === JSON.stringify(currentTop);
 }

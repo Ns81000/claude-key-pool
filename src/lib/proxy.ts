@@ -138,8 +138,13 @@ export function computeCooldownUntil(headers: Headers, group?: GroupConfig): num
     if (lower.startsWith('anthropic-ratelimit-') && lower.endsWith('-reset')) {
       const secs = Number(value);
       if (Number.isFinite(secs) && secs > 0) {
-        // Reset headers are usually a unix timestamp; treat large values as epoch.
-        return secs > 1e6 ? secs * 1000 : now + secs * 1000;
+        // Reset headers are usually a unix timestamp; treat large values as
+        // epoch. The boundary must separate epoch-SECONDS (~1.7e9) from
+        // epoch-MILLISECONDS (~1.7e12): a ms-epoch read here previously
+        // multiplied by 1000 again → cooldown until year ~560000.
+        if (secs > 1e12) return secs; // ms epoch already
+        if (secs > 1e6) return secs * 1000; // s epoch
+        return now + secs * 1000; // relative seconds
       }
       const dateMs = Date.parse(value);
       if (Number.isFinite(dateMs)) return Math.max(now + 1000, dateMs);
@@ -493,59 +498,93 @@ export async function peekStreamForLimit(
   return { limited: false, stream };
 }
 
-// Create a ReadableStream that replays buffered head chunks, then pipes the
-// remainder from the reader. Implements stall timeout (Bug #11): if no chunk
-// arrives within STALL_TIMEOUT_MS, the stream is aborted.
+// Create a ReadableStream that replays buffered head chunks, then pumps the
+// remainder from the reader. Implements stall timeout (Bug #11): if the
+// UPSTREAM produces no chunk within STALL_TIMEOUT_MS of being asked, the
+// stream is aborted.
+//
+// The pump is decoupled from the consumer's pull(): a slow client that stops
+// reading (backpressure, desiredSize <= 0) merely parks the pump waiting for
+// drain — its silence does not count against the stall timer. The previous
+// shape reset the timer only inside pull(), so a client pausing for longer
+// than the timeout killed a perfectly healthy upstream stream.
 export function createStallProtectedStream(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   headChunks: Uint8Array[] = [],
 ): ReadableStream<Uint8Array> {
-  let stallTimer: ReturnType<typeof setTimeout> | null = null;
+  let closed = false;
+  // Resolved when the client drains the queue enough for the pump to resume.
+  let drainWaiters: Array<() => void> = [];
 
-  function resetStallTimer(controller: ReadableStreamDefaultController<Uint8Array>) {
-    if (stallTimer) clearTimeout(stallTimer);
-    stallTimer = setTimeout(() => {
+  function releaseDrainWaiters(): void {
+    const waiters = drainWaiters;
+    drainWaiters = [];
+    for (const resolve of waiters) resolve();
+  }
+
+  // One read with a stall deadline. The timer measures upstream silence only:
+  // while the pump is parked waiting for a slow client, no timer runs.
+  function readWithStallTimeout(): Promise<ReadableStreamReadResult<Uint8Array>> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`Upstream stalled: no data received for ${STALL_TIMEOUT_MS / 1000}s`));
+      }, STALL_TIMEOUT_MS);
+      timer.unref?.();
+      reader.read().then(
+        (result) => {
+          clearTimeout(timer);
+          resolve(result);
+        },
+        (err) => {
+          clearTimeout(timer);
+          reject(err);
+        },
+      );
+    });
+  }
+
+  async function pump(controller: ReadableStreamDefaultController<Uint8Array>): Promise<void> {
+    try {
+      for (;;) {
+        // Backpressure: the client is not keeping up. Park WITHOUT a stall
+        // timer — the upstream may have plenty of data buffered in the
+        // reader; only its own silence counts as a stall.
+        if (controller.desiredSize !== null && controller.desiredSize <= 0) {
+          await new Promise<void>((resolve) => drainWaiters.push(resolve));
+          if (closed) return;
+          continue;
+        }
+        const result = await readWithStallTimeout();
+        if (result.done) {
+          controller.close();
+          return;
+        }
+        if (result.value) controller.enqueue(result.value);
+      }
+    } catch (err) {
+      if (closed) return;
+      closed = true;
       try {
-        controller.error(new Error(`Upstream stalled: no data received for ${STALL_TIMEOUT_MS / 1000}s`));
-        reader.cancel('stall timeout').catch(() => {});
+        controller.error(err);
       } catch {
         /* controller may already be closed */
       }
-    }, STALL_TIMEOUT_MS);
-  }
-
-  function clearStall() {
-    if (stallTimer) {
-      clearTimeout(stallTimer);
-      stallTimer = null;
+      reader.cancel('stall timeout').catch(() => {});
     }
   }
 
   return new ReadableStream<Uint8Array>({
     start(controller) {
       for (const c of headChunks) controller.enqueue(c);
-      // Start the stall timer for the remainder of the stream.
-      resetStallTimer(controller);
+      void pump(controller);
     },
-    async pull(controller) {
-      try {
-        const { done, value } = await reader.read();
-        if (done) {
-          clearStall();
-          controller.close();
-          return;
-        }
-        if (value) {
-          resetStallTimer(controller);
-          controller.enqueue(value);
-        }
-      } catch (err) {
-        clearStall();
-        controller.error(err);
-      }
+    // The client read from the queue — wake the pump if it is parked.
+    pull() {
+      releaseDrainWaiters();
     },
     cancel(reason) {
-      clearStall();
+      closed = true;
+      releaseDrainWaiters();
       reader.cancel(reason).catch(() => {});
     },
   });

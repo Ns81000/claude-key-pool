@@ -58,10 +58,16 @@ function getTimestamp() {
   return `${HH}:${mm}:${ss}`;
 }
 
-// Monotonically increasing request counter for easy tracking
-let requestCounter = 0;
+// Monotonically increasing request counter for easy tracking. Kept on
+// `global` (same technique as proxyState / activityState): Next dev
+// hot-reloads re-initialize route modules, and a module-level counter would
+// restart from 0 — duplicate #NNN ids in the activity log and React keys.
+const globalForLogger = global as unknown as { requestCounter?: number };
+if (globalForLogger.requestCounter === undefined) {
+  globalForLogger.requestCounter = 0;
+}
 export function nextRequestId(): number {
-  return ++requestCounter;
+  return ++globalForLogger.requestCounter!;
 }
 
 export function proxyLog(level: LogLevel, keyEmail: string | undefined, message: string) {

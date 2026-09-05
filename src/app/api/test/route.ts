@@ -13,14 +13,19 @@ export const dynamic = 'force-dynamic';
 // would see it.
 // One probe at a time: parallel Test clicks (a second tab, a page reload)
 // would each spend real upstream quota and, on a 429, quarantine a live key.
-// Module-level on purpose — the server process is single-instance.
-let probeInFlight = false;
+// On `global` (same technique as proxyState): Next dev hot-reloads
+// re-initialize this module, and a module-level flag would reset to false —
+// allowing exactly the parallel probes it exists to prevent.
+const globalForTest = global as unknown as { probeInFlight?: boolean };
+if (globalForTest.probeInFlight === undefined) {
+  globalForTest.probeInFlight = false;
+}
 
 export async function POST(req: NextRequest) {
   const rejected = rejectCrossSiteRequest(req);
   if (rejected) return rejected;
 
-  if (probeInFlight) {
+  if (globalForTest.probeInFlight) {
     return NextResponse.json(
       { ok: false, error: 'A test probe is already in progress — wait for it to finish' },
       { status: 409 },
@@ -47,7 +52,7 @@ export async function POST(req: NextRequest) {
   const onClientAbort = () => controller.abort();
   req.signal.addEventListener('abort', onClientAbort, { once: true });
   const timer = setTimeout(() => controller.abort(), 120_000);
-  probeInFlight = true;
+  globalForTest.probeInFlight = true;
   const started = Date.now();
   try {
     const res = await fetch(`${origin}/v1/messages`, {
@@ -102,7 +107,7 @@ export async function POST(req: NextRequest) {
           : 'Probe failed';
     return NextResponse.json({ ok: false, error: message });
   } finally {
-    probeInFlight = false;
+    globalForTest.probeInFlight = false;
     clearTimeout(timer);
     req.signal.removeEventListener('abort', onClientAbort);
   }

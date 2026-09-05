@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import {
   loadConfig,
   mutateConfig,
-  getConfigVersion,
+  StaleConfigVersionError,
   connectToClaude,
   disconnectFromClaude,
   buildConfigView,
@@ -63,34 +63,44 @@ export async function POST(req: NextRequest) {
       // snapshot: the client echoes the configVersion it edited; a mismatch
       // means the config changed since (another tab, or this tab's stale
       // poll), and saving that snapshot would erase those changes — e.g. a
-      // key added in another tab. Reject with 409; the dashboard reloads.
-      if (config && typeof config.configVersion === 'number') {
-        if (config.configVersion !== getConfigVersion()) {
+      // key added in another tab. The version check runs INSIDE the write
+      // chain step (mutateConfig), not here: checked outside the chain,
+      // another write can land between the check and this save's turn —
+      // the check would pass against a version that is already stale.
+      try {
+        const current = await mutateConfig(
+          (cfg: AppConfig) => {
+            if (config) {
+              cfg.groups = sanitizeGroups(config.groups);
+              cfg.activeGroupId = config.activeGroupId ?? cfg.activeGroupId;
+              if (typeof config.selectedModel === 'string') {
+                cfg.selectedModel = config.selectedModel || null;
+              }
+              // Symmetric with selectedModel: '' clears the fast model.
+              if (typeof config.smallFastModel === 'string') {
+                cfg.smallFastModel = config.smallFastModel || null;
+              } else if (config.smallFastModel === null) {
+                cfg.smallFastModel = null;
+              }
+            }
+            if (cfg.isConnected) {
+              try { connectToClaude(cfg); } catch { /* best-effort env sync */ }
+            }
+          },
+          config && typeof config.configVersion === 'number'
+            ? config.configVersion
+            : undefined,
+        );
+        return NextResponse.json(buildConfigView(current));
+      } catch (error) {
+        if (error instanceof StaleConfigVersionError) {
           return NextResponse.json(
             { error: 'Configuration was changed by another tab or action — reloaded, retry your edit' },
             { status: 409 },
           );
         }
+        throw error;
       }
-      const current = await mutateConfig((cfg: AppConfig) => {
-        if (config) {
-          cfg.groups = sanitizeGroups(config.groups);
-          cfg.activeGroupId = config.activeGroupId ?? cfg.activeGroupId;
-          if (typeof config.selectedModel === 'string') {
-            cfg.selectedModel = config.selectedModel || null;
-          }
-          // Symmetric with selectedModel: '' clears the fast model.
-          if (typeof config.smallFastModel === 'string') {
-            cfg.smallFastModel = config.smallFastModel || null;
-          } else if (config.smallFastModel === null) {
-            cfg.smallFastModel = null;
-          }
-        }
-        if (cfg.isConnected) {
-          try { connectToClaude(cfg); } catch { /* best-effort env sync */ }
-        }
-      });
-      return NextResponse.json(buildConfigView(current));
     }
 
     if (action === 'setActiveGroup') {

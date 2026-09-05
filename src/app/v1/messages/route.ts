@@ -42,6 +42,7 @@ import {
   nextRequestId,
 } from '@/lib/logger';
 import { RequestTracker, startRequest } from '@/lib/activity';
+import { rejectCrossSiteRequest } from '@/lib/localGuard';
 
 export const dynamic = 'force-dynamic';
 
@@ -50,6 +51,15 @@ function errorJson(type: string, message: string, status: number) {
 }
 
 export async function POST(req: NextRequest) {
+  // Cross-site guard (DNS-rebinding / drive-by): a web page open in a browser
+  // can fire a "simple" cross-site POST that burns upstream quota and
+  // quarantines keys. Transparent for header-less clients (curl, Claude Code).
+  const crossSiteRejected = rejectCrossSiteRequest(req);
+  if (crossSiteRejected) {
+    // act not created yet — nothing to finish; the log entry is not needed
+    // for requests that never reach the pool.
+    return crossSiteRejected;
+  }
   const config = loadConfig();
   const reqId = nextRequestId();
   const startTime = Date.now();
@@ -99,8 +109,18 @@ export async function POST(req: NextRequest) {
   }
 
   // Read the raw body once. We must inspect `stream`, so parse a copy but forward
-  // the original bytes to avoid re-serializing large payloads.
-  const rawBody = await req.arrayBuffer();
+  // the original bytes to avoid re-serializing large payloads. A client that
+  // drops the connection mid-upload throws here — record it honestly instead
+  // of dying with a bare 500 and losing the log entry.
+  let rawBody: ArrayBuffer;
+  try {
+    rawBody = await req.arrayBuffer();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    proxyLog('WARN', undefined, `#${reqId} Request body read failed: ${message}`);
+    act.finish('rejected', 400, `request body read failed: ${message}`);
+    return errorJson('invalid_request_error', 'Failed to read request body.', 400);
+  }
   let isStream = false;
   let model = 'unknown';
   let parsed: { stream?: unknown; model?: unknown } | null = null;
@@ -394,8 +414,23 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // Non-streaming success.
-    const textBody = await upstream.text();
+    // Non-streaming success. The body read can throw (upstream sent headers
+    // 200, then the connection died mid-body): without a catch the inFlight
+    // counter leaks forever, the tracker never finishes, and the key skips
+    // the provider-error cooldown — treat it like any other transient
+    // upstream failure and rotate.
+    let textBody: string;
+    try {
+      textBody = await upstream.text();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      markProviderError(key.id);
+      decrementInFlight(key.id);
+      totalTransientFailures++;
+      act.note(key.id, key.email, group.name, 'provider-error', `body read failed: ${message}`);
+      logRotation(reqId, key.email, `Body read failed: ${message} → provider error (5-min cooldown)`);
+      continue;
+    }
     const validation = validateNonStreamingResponseBody(textBody);
     if (!validation.valid) {
       markProviderError(key.id);
@@ -475,6 +510,11 @@ export async function POST(req: NextRequest) {
 // scans the SSE frames for usage info (message_start carries input_tokens,
 // message_delta at the end carries output_tokens) so streaming requests get
 // token counts in the activity statistics too.
+//
+// The request outcome is decided by how the stream actually ends: the route
+// marks it `success` when the 200 head is committed, and this wrapper
+// rewrites the entry if the stream later dies (error/cancel mid-body) —
+// otherwise a broken stream would sit in the log as a green OK forever.
 function trackStreamCompletion(
   stream: ReadableStream<Uint8Array>,
   keyId: string,
@@ -494,6 +534,11 @@ function trackStreamCompletion(
       decrementInFlight(keyId);
       proxyLog('INFO', keyEmail, `#${reqId} Stream completed`);
     }
+  }
+
+  function markStreamFailed(reason: string) {
+    act?.rewriteOutcome('provider-error', 200, `stream died mid-body: ${reason}`);
+    proxyLog('WARN', keyEmail, `#${reqId} Stream failed mid-body: ${reason}`);
   }
 
   // Extract token usage from complete SSE data lines. Only message_start /
@@ -538,6 +583,13 @@ function trackStreamCompletion(
       try {
         const result = await reader.read();
         if (result.done) {
+          // Flush the final partial line: a non-canonical relay may end its
+          // last usage frame without a trailing newline, and that frame
+          // would otherwise never be scanned.
+          if (act && lineTail) {
+            scanForUsage(lineTail + decoder.decode());
+            lineTail = '';
+          }
           finish();
           controller.close();
           return;
@@ -560,11 +612,15 @@ function trackStreamCompletion(
         }
       } catch (err) {
         finish();
+        markStreamFailed(err instanceof Error ? err.message : String(err));
         controller.error(err);
       }
     },
     cancel(reason) {
       finish();
+      // Client-side aborts (Esc in Claude Code) are not provider failures —
+      // rewrite only when the upstream itself died; a cancel carries the
+      // client's reason.
       reader.cancel(reason).catch(() => {});
     },
   });

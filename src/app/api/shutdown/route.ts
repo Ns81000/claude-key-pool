@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { loadConfig, saveConfig, disconnectFromClaude } from '@/lib/config';
+import { flushStatsNow } from '@/lib/activity';
 import { rejectCrossSiteRequest } from '@/lib/localGuard';
 
 export const dynamic = 'force-dynamic';
@@ -24,6 +25,11 @@ export async function POST(req: NextRequest) {
     // stuck with a running process they can't stop from the UI.
     console.error('Failed to restore settings.json on shutdown:', error);
   }
+
+  // The stats save is debounced (5s) and its timer is unref'd — without a
+  // synchronous flush the last few seconds of key statistics would be lost
+  // to process.exit().
+  flushStatsNow();
 
   // Bug #6 fix: increased from 300ms to 1000ms for more reliable response flushing.
   // Respond before exiting so the browser gets a clean acknowledgement.

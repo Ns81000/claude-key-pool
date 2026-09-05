@@ -7,10 +7,23 @@ import { NextRequest, NextResponse } from 'next/server';
 // server. Browsers always attach Origin / Sec-Fetch-Site to cross-site
 // requests, so we reject on those; header-less clients (curl, the CLI)
 // pass through untouched.
+//
+// Host pinning: Origin==Host alone does not stop DNS rebinding (an
+// attacker's domain resolving to 127.0.0.1 makes BOTH headers carry that
+// domain, and GET /api/config returns unmasked key values). The listener is
+// bound to 127.0.0.1, so every legitimate request arrives on a loopback
+// Host; anything else is a rebinding probe.
 export function rejectCrossSiteRequest(req: NextRequest): NextResponse | null {
+  const host = (req.headers.get('host') || '').toLowerCase();
+  // Strip the port, honoring the bracketed IPv6 form ("[::1]:9999").
+  const ipv6 = host.match(/^\[([^\]]+)\]/);
+  const hostName = ipv6 ? ipv6[1] : host.split(':')[0];
+  if (hostName !== 'localhost' && hostName !== '127.0.0.1' && hostName !== '::1') {
+    return NextResponse.json({ error: 'non-loopback host rejected' }, { status: 403 });
+  }
+
   const origin = req.headers.get('origin');
   if (origin) {
-    const host = (req.headers.get('host') || '').toLowerCase();
     let originHost = '';
     try {
       originHost = new URL(origin).host.toLowerCase();
