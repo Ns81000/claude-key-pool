@@ -437,9 +437,18 @@ export function connectToClaude(config: AppConfig): AppConfig {
   // Decoupling it from the main model keeps those tiny calls on a cheap fast
   // model and makes them fail independently of the main model's availability.
   const smallModel = config.smallFastModel || modelName;
+  // Slot mapping: the CLI's model slots map onto the pool's available models
+  // so /model inside a live session actually switches between them (the pool
+  // routes by the request's model name, no restart needed). The main model
+  // takes the top slots (Opus/Fable); other pool models fill Sonnet/Haiku.
+  // When the pool has only the main model, every slot maps to it (the
+  // previous behavior).
+  const otherModels = config.groups
+    .map((g) => g.model)
+    .filter((m): m is string => !!m && m !== modelName && m !== smallModel);
   settingsJson.env.ANTHROPIC_DEFAULT_OPUS_MODEL = modelName;
-  settingsJson.env.ANTHROPIC_DEFAULT_SONNET_MODEL = modelName;
-  settingsJson.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = smallModel;
+  settingsJson.env.ANTHROPIC_DEFAULT_SONNET_MODEL = otherModels[0] ?? modelName;
+  settingsJson.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = otherModels[1] ?? otherModels[0] ?? smallModel;
   settingsJson.env.ANTHROPIC_SMALL_FAST_MODEL = smallModel;
   settingsJson.env.ANTHROPIC_DEFAULT_FABLE_MODEL = modelName;
   settingsJson.env.CLAUDE_CODE_EFFORT_LEVEL = 'high';
