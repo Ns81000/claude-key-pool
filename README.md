@@ -1,9 +1,10 @@
 # Claude Key Pool (локальная развёртка)
 
-Локальный прокси `127.0.0.1:9999` (Next.js 16) для **Claude Code**: пул
-агентских ключей agentrouter с честным round-robin, карантинами исчерпанных
-ключей и перекатом на следующий ключ внутри того же запроса — в том числе
-посреди SSE-стрима. Клон [Ns81000/claude-key-pool](https://github.com/Ns81000/claude-key-pool)
+Локальный прокси `127.0.0.1:9999` (Next.js 16) для **Claude Code** и
+**Kilo Code**: пул агентских ключей agentrouter с честным round-robin,
+карантинами исчерпанных ключей и перекатом на следующий ключ внутри того же
+запроса — в том числе посреди SSE-стрима. Клон
+[Ns81000/claude-key-pool](https://github.com/Ns81000/claude-key-pool)
 с локальными правками (коммит `0115ad0`: привязка слушателя к `127.0.0.1`,
 drive-by-защита, классификация 401). Локальные коммиты — можно, **push в
 апстрим запрещён**.
@@ -27,24 +28,26 @@ drive-by-защита, классификация 401). Локальные ко�
      │  Python/FastAPI  │                                  │  Next.js             │
      │  WAF-кодек +     │                                  │  ротация 14 ключей   │
      │  маска UA + пул  │                                  │  agentrouter         │
-     └─────────▲────────┘                                  └──────────▲───────────┘
-               │                                                      │
-               │ /v1/messages (Anthropic)                             │ /v1/messages
-               │ или /v1/chat/completions (OpenAI)                    │ (Anthropic)
-     ┌─────────┴────────┐                                   ┌──────────┴──────────┐
-     │     Kilo Code    │                                   │    Claude Code     │
-     └──────────────────┘                                   └─────────────────────┘
+     └─────────▲────────┘                                  └───▲──────────────▲───┘
+               │                                               │              │
+               │ /v1/messages (Anthropic)                      │ /v1/messages │ /v1/messages
+               │ или /v1/chat/completions (OpenAI)             │ (Anthropic)  │ (Anthropic, x-app: kilo)
+     ┌─────────┴────────┐                              ┌───────┴──────┐  ┌────┴─────────┐
+     │     Kilo Code    │                              │ Claude Code  │  │   Kilo Code  │
+     └──────────────────┘                              └──────────────┘  └──────────────┘
 ```
 
-- **claude-key-pool (9999)** — маршрут Claude Code: мультиаккаунтная ротация.
-  Claude Code WAF не триггерит, кодек не нужен. Все запросы к апстриму идут
-  с маской User-Agent `claude-cli/2.0.0 (external, cli)` — агентрантера
-  отвергает «неразрешённые» клиенты по UA (401 «unauthorized client
-  detected»), а браузер не может подменить свой UA, поэтому пул подставляет
-  маску сам (коммит `0a9ed15`; тот же приём, что proxy_ai делает с
-  `codex_cli_rs` для Kilo Code).
-- **proxy_ai (8318)** — маршрут Kilo Code (WAF-кодек + маска UA). К этому пулу
-  отношения не имеет.
+- **claude-key-pool (9999)** — основной маршрут Claude Code; с 2026-09-05
+  принимает и Kilo Code через **профиль Kilo** (см. ниже) — тот же пул
+  ключей, отдельный тумблер. Claude Code WAF не триггерит, кодек не нужен.
+  Все запросы к апстриму идут с маской User-Agent
+  `claude-cli/2.0.0 (external, cli)` — агентрантера отвергает
+  «неразрешённые» клиенты по UA (401 «unauthorized client detected»), а
+  браузер не может подменить свой UA, поэтому пул подставляет маску сам
+  (коммит `0a9ed15`; тот же приём, что proxy_ai делает с `codex_cli_rs`).
+- **proxy_ai (8318)** — исторический маршрут Kilo Code (WAF-кодек + маска
+  UA, обход sensitive-words фильтра агентрантера). Профиль Kilo в этом пуле
+  его не заменяет: пул не делает WAF-кодек, а только ротацию ключей.
 
 ## Текущая конфигурация
 
@@ -54,6 +57,7 @@ drive-by-защита, классификация 401). Локальные ко�
 | `selectedModel` | `glm-5.3` — модель по умолчанию; меняется в панели или в сессии Claude Code (`/model`) — слоты CLI разведены по моделям пула: Opus/Fable→`glm-5.3`, Sonnet→`gpt-5.6-sol`, Haiku→`deepseek-v4-flash`; маршрутизация идёт по модели запроса, перезапуск пула не нужен |
 | `smallFastModel` | `glm-5.3` (фоновые запросы Claude Code идут через ту же модель) |
 | `isConnected` | `true` — Claude Code подключён |
+| Профиль Kilo | `kiloConnected: false` — тумблер в панели, независимо от профиля Claude Code (см. «Профиль Kilo Code») |
 
 Ключи лежат в `config.json` (в `.gitignore`, в коммиты не попадает). Рантайм
 перечитывает его автоматически по изменению mtime — правка файла или сохранение
@@ -145,6 +149,95 @@ connect прописывает в настройках Claude Code переме�
 - Изменения env подхватываются **новыми** сессиями Claude Code; уже запущенная
   сессия продолжает работать на прежнем окружении.
 
+## Профиль Kilo Code
+
+Второй клиент того же пула: кнопка **Kilo: on/off** в шапке панели
+(`POST /api/config {"action":"kiloConnect" | "kiloDisconnect"}`). Профиль
+независим от профиля Claude Code — включены могут быть оба, любой один или
+никакой. Отдельный прокси для Kilo не создаётся: Kilo ходит в тот же
+`127.0.0.1:9999` теми же ключами пула.
+
+**kiloConnect** пишет в `~/.config/kilo/kilo.jsonc` провайдер:
+
+| Поле | Значение |
+|---|---|
+| `provider["claude-key-pool"].npm` | `@ai-sdk/anthropic` (Anthropic-протокол) |
+| `options.baseURL` | `http://127.0.0.1:9999/v1` |
+| `options.apiKey` | `sk-ant-dummy-rotated-by-key-pool-proxy-9999` (заглушка; ключ подставляет пул) |
+| `options.headers["x-app"]` | `kilo` — маркер профиля для логов и статистики (Claude Code шлёт `cli`) |
+| `models` | модели включённых групп пула (или сохранённый пользовательский список, если он был задан вручную) |
+
+Остальное содержимое kilo.jsonc не трогается. Пока профиль включён, селектор
+моделей Kilo показывает **только модели пула**: все прочие провайдеры
+переносятся в `disabled_providers` (скрытие без удаления), прежний список
+снимается в `config.kiloDisabledBackup` пула и восстанавливается при
+**kiloDisconnect** (вместе с удалением провайдера `claude-key-pool`).
+
+**Предостережение:** Kilo держит kilo.jsonc в памяти и периодически
+перезаписывает его оттуда. Переключайте профиль, когда в Kilo нет активной
+сессии, иначе Kilo может затереть запись пула своей версией файла.
+
+### Авто-reload Kilo (логика кнопки «Перезагрузить»)
+
+Kilo не следит за kilo.jsonc: без перечитывания список моделей в окне сессии
+остаётся прежним. Кнопка «Перезагрузить» в настройках плагина решает это —
+и то же самое пул делает автоматически после каждой записи kilo.jsonc, так
+что вручную жать кнопку не нужно.
+
+**Как устроена кнопка** (раскопано из `dist/extension.js` плагина 7.5.14):
+команда `kilo-code.new.reload` → `handleReload()` → `POST
+http://localhost:<port>/instance/reload` на локальный сервер `kilo.exe
+serve`, который расширение само порождает. Сервер защищён Basic-авторизацией
+`kilo:<пароль>`, где пароль — `crypto.randomBytes(32).toString("hex")`,
+генерируется **при каждом запуске Kilo** и передаётся только через
+переменную окружения `KILO_SERVER_PASSWORD` процесса сервера. На диск пароль
+не пишется нигде, CLI-команды «перезагрузить запущенный сервер» у kilo.exe
+нет, конфиг никто не ватчит — напрямую из внешнего процесса до эндпоинта
+не достучаться (все пути отдают 401).
+
+**Решение** — `scripts/kilo-reload.ps1` (обёртка `src/lib/kiloReload.ts`,
+вызывается из `kiloConnect`/`kiloDisconnect` после записи kilo.jsonc,
+best-effort, никогда не валит действие):
+
+1. Найти процесс `kilo.exe` с `serve` в командной строке
+   (`Get-CimInstance Win32_Process`).
+2. Прочитать `KILO_SERVER_PASSWORD` из **env-блока чужого процесса**: тот же
+   пользователь, read-only, через `NtQueryInformationProcess` → PEB →
+   `RTL_USER_PROCESS_PARAMETERS` → `ReadProcessMemory`. Смещения x64:
+   ProcessParameters в PEB+0x20; указатель Environment — `+0x98` в
+   классической раскладке и `+0x80` на Windows 11 24H2+ (пробуются оба;
+   раскладка откалибрована по живому процессу); размер блока — `+0x3F0`,
+   с фолбэком на скан до двойного NUL.
+3. Определить порт сервера по его listener'ам (`Get-NetTCPConnection`).
+4. `POST /instance/reload` с `Authorization: Basic base64("kilo:" + пароль)`
+   — дословно тот же вызов, что делает кнопка.
+
+**Исходы** приходят в ответе `kiloConnect`/`kiloDisconnect` полем
+`kiloReload` и показываются в toast панели:
+
+| Статус | Смысл |
+|---|---|
+| `reloaded` | сервер Kilo перечитал kilo.jsonc — селектор моделей обновлён |
+| `kilo-not-running` | Kilo не запущен; конфиг применится при следующем старте (тихо, не ошибка) |
+| `session-running` | HTTP 409: в Kilo идёт активная сессия, сервер отказывает в reload — нажать «Перезагрузить» после её завершения (поведение самой кнопки, обойти нельзя) |
+| `failed` / `timeout` | прочее (PowerShell заблокирован, процесс без пароля в env и т.п.) — действие переключения всё равно выполнено |
+
+### Разделение профилей в логах и статистике
+
+Запросы Kilo несут `x-app: kilo`, всё остальное (Claude Code, curl) считается
+профилем claude. Разделение видно в трёх местах:
+
+- **терминальный лог** — метка `[kilo]` в строках старта и завершения запроса;
+- **Recent requests** — колонка Client (бейдж kilo);
+- **Key statistics** — колонка Client split (`claude N · kilo M` запросов по
+  каждому ключу, в tooltip — токены in/out каждого профиля) и сегмент
+  `claude N / kilo M` в строке итогов.
+
+Разбивка накапливается в `stats.json` теми же полями (`attemptsClaude`,
+`attemptsKilo`, `inputTokensClaude/Kilo`, …) и переживает рестарты.
+Статистика, записанная до разделения (2026-09-05), остаётся в общих полях
+(attempts, tokens), в разбивке по клиентам она начинается с нуля.
+
 ## Панель управления
 
 `http://127.0.0.1:9999` — группы, ключи, статусы, действия:
@@ -153,7 +246,8 @@ connect прописывает в настройках Claude Code переме�
 - добавить ключи (email/метка — то, что видно в логах вместо значения ключа);
 - выбрать модель в шапке (`setModel`) — меняет состав ротации; дропдауны
   (главный и fast) не предлагают модели выключенных групп;
-- **Connect / Disconnect** для Claude Code;
+- **Connect / Disconnect** для Claude Code и **Kilo: on/off** для профиля
+  Kilo Code (независимые тумблеры, один и тот же пул);
 - сбросить карантин группы (`resetGroupRateLimit`);
 - **Test** — серверная проба через собственный `/v1/messages` (браузер не может
   подставить UA claude-cli, который требует фильтр клиентов agentrouter);
@@ -183,7 +277,7 @@ API:
 | `POST` | `/v1/messages` | основной прокси-маршрут (ротация, перекаты) |
 | `GET` | `/v1/models` | список моделей апстрима (тоже через ротацию; без выбранной модели — 400) |
 | `GET` | `/api/config` | конфиг + живые статусы ключей |
-| `POST` | `/api/config` | действия: `save`, `setActiveGroup`, `resetGroupRateLimit`, `connect`, `disconnect`, `setModel` |
+| `POST` | `/api/config` | действия: `save`, `setActiveGroup`, `resetGroupRateLimit`, `connect`, `disconnect`, `kiloConnect`, `kiloDisconnect`, `setModel` |
 | `GET` | `/api/activity` | лог последних запросов + накопительная статистика по ключам (`?limit=N`, до 500) |
 | `POST` | `/api/activity` | действия: `clearLogs` (очистить лог), `resetStats` (обнулить статистику) |
 | `POST` | `/api/shutdown` | остановка сервера из панели (при этом авто-disconnect) |
@@ -223,10 +317,12 @@ pnpm dev          # режим разработки (hot reload)
 - `src/app/api/config/route.ts` — панельные действия, `localGuard`
 - `src/app/api/shutdown/route.ts` — остановка сервера (с авто-disconnect)
 - `src/lib/proxy.ts` — выбор ключа (`getNextCandidate`, `buildFlatPool`), заголовки, классификация ответов, cooldown
-- `src/lib/config.ts` — `config.json` (mtime-кеш, hot reload), `connectToClaude`/`disconnectFromClaude`, атомарная запись
+- `src/lib/config.ts` — `config.json` (mtime-кеш, hot reload), `connectToClaude`/`disconnectFromClaude`, `connectToKilo`/`disconnectFromKilo`, атомарная запись
+- `src/lib/kiloReload.ts` — обёртка авто-reload Kilo (spawn `scripts/kilo-reload.ps1`, таймаут, парсинг JSON-исхода)
+- `scripts/kilo-reload.ps1` — реплика кнопки «Перезагрузить» плагина Kilo: чтение одноразового пароля сервера из env его процесса (PEB, read-only) + `POST /instance/reload`
 - `src/lib/localGuard.ts` — cross-site защита ручек `/api/*`
 - `src/lib/logger.ts` — цветные терминальные логи (метка ключа, ID запроса, причины ротации)
-- `src/lib/activity.ts` — лог запросов (кольцевой буфер на 500) и накопительная статистика по ключам (`stats.json`, debounce-персист)
+- `src/lib/activity.ts` — лог запросов (кольцевой буфер на 500) и накопительная статистика по ключам (`stats.json`, debounce-персист); поле `client` (`claude`/`kilo`) разделяет профили в обоих слоях
 - `src/app/activity-panel.tsx` — панель «Key statistics» + «Recent requests» в дашборде
 - `config.json` — конфигурация с ключами (в `.gitignore`); `config.backup.json` — автоснимок пула перед перезаписью; `config.example.json` — шаблон; `stats.json` — накопительная статистика ключей (в `.gitignore`, рантайм-файл)
 - `install.ps1` / `update.ps1` — скрипты апстрима (к этой локальной копии не применяются)
