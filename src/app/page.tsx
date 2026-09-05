@@ -17,6 +17,7 @@ import {
   ChevronDown,
 } from 'lucide-react';
 import type { AppConfigView, GroupView, KeyView, PoolStats } from '@/lib/config';
+import ActivityPanel from './activity-panel';
 
 // ---------------------------------------------------------------------------
 // Small primitives
@@ -1305,6 +1306,9 @@ export default function Home() {
             </div>
           </section>
         </div>
+
+        {/* Activity: request log + per-key statistics */}
+        <ActivityPanel />
       </main>
 
       <ConfirmDialog state={confirm} onClose={() => setConfirm(null)} />

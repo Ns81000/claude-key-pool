@@ -41,6 +41,7 @@ import {
   logSeparator,
   nextRequestId,
 } from '@/lib/logger';
+import { RequestTracker, startRequest } from '@/lib/activity';
 
 export const dynamic = 'force-dynamic';
 
@@ -52,9 +53,13 @@ export async function POST(req: NextRequest) {
   const config = loadConfig();
   const reqId = nextRequestId();
   const startTime = Date.now();
+  // Activity tracker: feeds the dashboard log + per-key stats. Same id as
+  // the console logger prints, so #NNN lines match across terminal and panel.
+  const act = startRequest(reqId, 'POST', '/v1/messages');
 
   if (!config.selectedModel) {
     proxyLog('ERROR', undefined, `#${reqId} No model selected`);
+    act.finish('no-pool', 400, 'no model selected');
     return errorJson(
       'invalid_request_error',
       'No model selected. Open http://localhost:9999 and select a model from the header.',
@@ -64,6 +69,7 @@ export async function POST(req: NextRequest) {
 
   if (config.groups.length === 0) {
     proxyLog('ERROR', undefined, `#${reqId} No groups or keys configured`);
+    act.finish('no-pool', 400, 'no groups or keys configured');
     return errorJson(
       'invalid_request_error',
       'No groups or keys configured in Claude Key Pool. Open http://localhost:9999 and configure them.',
@@ -77,6 +83,7 @@ export async function POST(req: NextRequest) {
   const pauseRemainingMs = getUpstreamPauseRemainingMs();
   if (pauseRemainingMs > 0) {
     proxyLog('WARN', undefined, `#${reqId} Upstream paused after IP-level rate limit (${Math.ceil(pauseRemainingMs / 1000)}s left) → failing fast`);
+    act.finish('ip-paused', 429, `pool paused after IP-level 429 (${Math.ceil(pauseRemainingMs / 1000)}s left)`);
     return NextResponse.json(
       {
         error: {
@@ -102,8 +109,11 @@ export async function POST(req: NextRequest) {
     isStream = parsed?.stream === true;
     model = typeof parsed?.model === 'string' && parsed.model ? parsed.model : 'unknown';
   } catch {
+    act.finish('rejected', 400, 'request body is not valid JSON');
     return errorJson('invalid_request_error', 'Failed to parse request JSON.', 400);
   }
+  act.setModel(model === 'unknown' ? null : model);
+  act.setStream(isStream);
 
   // The harness tags requested context size onto the model name (e.g.
   // "glm-5.3[1m]" for the 1M-token window). The bracket suffix is a
@@ -154,6 +164,7 @@ export async function POST(req: NextRequest) {
     // groups disabled, or the group's model was renamed). A 429 here sent
     // operators chasing key quarantines that don't exist.
     proxyLog('ERROR', undefined, `#${reqId} No enabled group serves model "${poolModel}"`);
+    act.finish('no-pool', 400, `no enabled group serves model "${poolModel}"`);
     return errorJson(
       'invalid_request_error',
       `No enabled group in Claude Key Pool serves model "${poolModel}". Open http://localhost:9999 and check group models / the selected model.`,
@@ -171,6 +182,7 @@ export async function POST(req: NextRequest) {
     // keys, quota, and 5-minute cooldowns on a request nobody waits for.
     if (req.signal.aborted) {
       proxyLog('WARN', candidate.key.email, `#${reqId} Client aborted during rotation → stopping`);
+      act.finish('aborted', 499, 'client aborted during rotation');
       return new Response('Client aborted', { status: 499 });
     }
 
@@ -187,6 +199,7 @@ export async function POST(req: NextRequest) {
 
     if (!group.targetUrl) {
       logRotation(reqId, key.email, `Group "${group.name}" has no target URL → marking all keys invalid`);
+      act.note(key.id, key.email, group.name, 'invalid', `group "${group.name}" has no target URL`);
       group.keys.forEach(k => markInvalid(k.id));
       continue;
     }
@@ -203,6 +216,7 @@ export async function POST(req: NextRequest) {
     const connectTimer = setTimeout(() => controller.abort(), CONNECT_TIMEOUT_MS);
 
     let upstream: Response;
+    const upstreamStartedAt = Date.now();
     try {
       upstream = await fetch(targetUrl, {
         method: 'POST',
@@ -216,19 +230,23 @@ export async function POST(req: NextRequest) {
 
       if (req.signal.aborted) {
         proxyLog('WARN', key.email, `#${reqId} Client aborted request`);
+        act.finish('aborted', 499, 'client aborted request');
         return new Response('Client aborted', { status: 499 });
       }
 
       const isTimeout = err && (err as { name?: string }).name === 'AbortError';
       if (isTimeout) {
         markKeySlow(key.id);
+        act.note(key.id, key.email, group.name, 'timeout', `connection timed out (${CONNECT_TIMEOUT_MS / 1000}s)`);
         logRotation(reqId, key.email, `Connection timed out (${CONNECT_TIMEOUT_MS / 1000}s) → marked slow`);
       } else if (isGroupLevelNetworkError(err)) {
         // DNS/refused/unreachable — the group's URL is the problem, not this key.
         markProviderError(key.id);
+        act.note(key.id, key.email, group.name, 'network', `network failure (${fetchErrorCode(err)}) — group URL unreachable`);
         logRotation(reqId, key.email, `Network failure (${fetchErrorCode(err)}) — group URL unreachable → 5-min cooldown`);
       } else {
         markKeySlow(key.id);
+        act.note(key.id, key.email, group.name, 'slow', `fetch failed: ${err instanceof Error ? err.message : String(err)}`);
         logRotation(reqId, key.email, `Fetch failed: ${err instanceof Error ? err.message : String(err)} → marked slow`);
       }
       totalTransientFailures++;
@@ -242,12 +260,14 @@ export async function POST(req: NextRequest) {
       if (verdict.kind === 'invalid') {
         markInvalid(key.id);
         decrementInFlight(key.id);
+        act.note(key.id, key.email, group.name, 'invalid', '429 → key invalid/revoked');
         logRotation(reqId, key.email, `429 → key invalid/revoked`);
         continue;
       }
       if (verdict.kind === 'key-limited') {
         limitKeyFromHeaders(key.id, upstream.headers, group);
         decrementInFlight(key.id);
+        act.note(key.id, key.email, group.name, 'rate-limited', '429 → rate limited (key cooled down)');
         logRotation(reqId, key.email, `429 → rate limited (key cooled down)`);
         continue;
       }
@@ -258,6 +278,7 @@ export async function POST(req: NextRequest) {
       // client retries with its own backoff.
       pauseUpstream(IP_PAUSE_MS);
       decrementInFlight(key.id);
+      act.finish('ip-paused', 429, `IP-level 429 → pool paused ${IP_PAUSE_MS / 1000}s (key not blamed)`);
       logRotation(reqId, key.email, `429 → IP-level rate limit → pool paused ${IP_PAUSE_MS / 1000}s, error returned to client (key NOT cooled down)`);
       return NextResponse.json(verdict.payload ?? { error: { type: 'rate_limit_error', message: 'Upstream IP-level rate limit' } }, {
         status: 429,
@@ -272,6 +293,7 @@ export async function POST(req: NextRequest) {
       const verdict = await classify401(upstream);
       if (verdict.kind === 'client-rejected') {
         decrementInFlight(key.id);
+        act.finish('client-error', 401, 'upstream rejected this client (key not blamed)');
         logRotation(reqId, key.email, `401 → upstream rejected this client (key NOT marked invalid)`);
         return NextResponse.json(verdict.payload, {
           status: 401,
@@ -280,6 +302,7 @@ export async function POST(req: NextRequest) {
       }
       markInvalid(key.id);
       decrementInFlight(key.id);
+      act.note(key.id, key.email, group.name, 'invalid', '401 → key invalid (auth failure)');
       logRotation(reqId, key.email, `401 → key invalid (auth failure)`);
       continue;
     }
@@ -290,6 +313,7 @@ export async function POST(req: NextRequest) {
     if (upstream.status === 403) {
       markProviderError(key.id);
       decrementInFlight(key.id);
+      act.note(key.id, key.email, group.name, 'provider-error', '403 → provider error (transient)');
       logRotation(reqId, key.email, `403 → provider error (transient, 5-min cooldown)`);
       totalTransientFailures++;
       continue;
@@ -301,12 +325,14 @@ export async function POST(req: NextRequest) {
       if (failure.kind === 'invalid') {
         markInvalid(key.id);
         decrementInFlight(key.id);
+        act.note(key.id, key.email, group.name, 'invalid', `${upstream.status} → key invalid (body)`);
         logRotation(reqId, key.email, `${upstream.status} → key invalid (body)`);
         continue;
       }
       if (failure.kind === 'limited') {
         markLimited(key.id, computeCooldownUntil(upstream.headers, group));
         decrementInFlight(key.id);
+        act.note(key.id, key.email, group.name, 'rate-limited', `${upstream.status} → rate limit (body)`);
         logRotation(reqId, key.email, `${upstream.status} → rate limit (body)`);
         continue;
       }
@@ -314,11 +340,13 @@ export async function POST(req: NextRequest) {
         markProviderError(key.id);
         decrementInFlight(key.id);
         totalTransientFailures++;
+        act.note(key.id, key.email, group.name, 'provider-error', `${upstream.status} → upstream server error`);
         logRotation(reqId, key.email, `${upstream.status} → upstream server error`);
         continue;
       }
       // Genuine client error (400 etc.) — forward to the client unchanged.
       decrementInFlight(key.id);
+      act.finish('client-error', upstream.status, `${upstream.status} client error forwarded`);
       proxyLog('WARN', key.email, `#${reqId} Forwarding ${upstream.status} client error`);
       return NextResponse.json(failure.payload ?? { error: 'Unknown error' }, {
         status: upstream.status,
@@ -332,6 +360,7 @@ export async function POST(req: NextRequest) {
       if (peek.limited) {
         limitKeyFromHeaders(key.id, upstream.headers, group);
         decrementInFlight(key.id);
+        act.note(key.id, key.email, group.name, 'rate-limited', 'mid-stream limit detected before content');
         logRotation(reqId, key.email, `Mid-stream limit detected before content`);
         continue;
       }
@@ -339,19 +368,24 @@ export async function POST(req: NextRequest) {
       if (peek.malformed) {
         markProviderError(key.id);
         decrementInFlight(key.id);
+        act.note(key.id, key.email, group.name, 'provider-error', `200 OK but ${peek.reason || 'malformed stream'}`);
         logRotation(reqId, key.email, `200 OK but ${peek.reason || 'malformed stream'} → provider error (rotating key)`);
         totalTransientFailures++;
         continue;
       }
 
+      act.noteSuccess(key.id, key.email, group.name, Date.now() - upstreamStartedAt);
+      act.finish('success', 200);
       logRequestComplete(reqId, key.email, Date.now() - startTime);
       proxyLog('SUCCESS', key.email, `#${reqId} Streaming response to client...`);
 
       // Decrement inFlight when the stream finishes (success or error).
+      // The wrapper also watches the SSE frames for usage tokens so the
+      // key statistics get input/output counts for streaming requests.
       const keyId = key.id;
       const keyEmail = key.email;
       const trackedStream = peek.stream
-        ? trackStreamCompletion(peek.stream, keyId, keyEmail, reqId)
+        ? trackStreamCompletion(peek.stream, keyId, keyEmail, reqId, act)
         : null;
 
       return new Response(trackedStream, {
@@ -366,6 +400,7 @@ export async function POST(req: NextRequest) {
     if (!validation.valid) {
       markProviderError(key.id);
       decrementInFlight(key.id);
+      act.note(key.id, key.email, group.name, 'provider-error', `200 OK but ${validation.reason}`);
       logRotation(reqId, key.email, `200 OK but ${validation.reason} → provider error (rotating key)`);
       totalTransientFailures++;
       continue;
@@ -374,6 +409,7 @@ export async function POST(req: NextRequest) {
     if (classifyInvalidPayload(validation.payload)) {
       markInvalid(key.id);
       decrementInFlight(key.id);
+      act.note(key.id, key.email, group.name, 'invalid', '200 OK with key invalid error in payload');
       logRotation(reqId, key.email, `200 OK with key invalid error in payload → key invalid`);
       continue;
     }
@@ -381,11 +417,21 @@ export async function POST(req: NextRequest) {
     if (classifyErrorPayload(validation.payload)) {
       limitKeyFromHeaders(key.id, upstream.headers, group);
       decrementInFlight(key.id);
+      act.note(key.id, key.email, group.name, 'rate-limited', '200 OK with rate limit error in payload');
       logRotation(reqId, key.email, `200 OK with rate limit error in payload → rate limited`);
       continue;
     }
 
     decrementInFlight(key.id);
+    act.noteSuccess(key.id, key.email, group.name, Date.now() - upstreamStartedAt);
+    const usage = (validation.payload as { usage?: { input_tokens?: unknown; output_tokens?: unknown } })?.usage;
+    if (usage && typeof usage === 'object') {
+      act.addTokens(
+        typeof usage.input_tokens === 'number' ? usage.input_tokens : null,
+        typeof usage.output_tokens === 'number' ? usage.output_tokens : null,
+      );
+    }
+    act.finish('success', upstream.status);
     logRequestComplete(reqId, key.email, Date.now() - startTime);
     return new Response(textBody, {
       status: upstream.status,
@@ -396,6 +442,11 @@ export async function POST(req: NextRequest) {
 
   // Exhausted all candidates across all groups.
   logExhausted(reqId, totalCandidatesTried, flatPoolSize);
+  act.finish(
+    'exhausted',
+    totalCandidatesTried === 0 ? 429 : totalTransientFailures === totalCandidatesTried ? 502 : 429,
+    `all keys exhausted (tried ${totalCandidatesTried}/${flatPoolSize})`,
+  );
 
   if (totalCandidatesTried === 0) {
     return errorJson(
@@ -420,21 +471,65 @@ export async function POST(req: NextRequest) {
   );
 }
 
-// Wrap a stream to decrement the inFlight counter when it finishes.
+// Wrap a stream to decrement the inFlight counter when it finishes. Also
+// scans the SSE frames for usage info (message_start carries input_tokens,
+// message_delta at the end carries output_tokens) so streaming requests get
+// token counts in the activity statistics too.
 function trackStreamCompletion(
   stream: ReadableStream<Uint8Array>,
   keyId: string,
   keyEmail: string,
   reqId: number,
+  act?: RequestTracker,
 ): ReadableStream<Uint8Array> {
   const reader = stream.getReader();
   let finished = false;
+  const decoder = new TextDecoder();
+  // SSE lines can split across chunks — keep the trailing partial line only.
+  let lineTail = '';
 
   function finish() {
     if (!finished) {
       finished = true;
       decrementInFlight(keyId);
       proxyLog('INFO', keyEmail, `#${reqId} Stream completed`);
+    }
+  }
+
+  // Extract token usage from complete SSE data lines. Only message_start /
+  // message_delta frames carry usage; agentrouter often sends input_tokens
+  // only in the final message_delta, so both are read from both frames.
+  function scanForUsage(text: string): void {
+    const lines = text.split(/\r?\n/);
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) continue;
+      const jsonStr = trimmed.slice(5).trim();
+      if (!jsonStr || jsonStr === '[DONE]') continue;
+      // Cheap pre-filter before JSON.parse: ~95% of frames are content
+      // deltas that carry no usage at all.
+      if (!jsonStr.includes('"message_start"') && !jsonStr.includes('"message_delta"')) continue;
+      try {
+        const obj = JSON.parse(jsonStr) as {
+          type?: string;
+          message?: { usage?: { input_tokens?: unknown; output_tokens?: unknown } };
+          usage?: { output_tokens?: unknown; input_tokens?: unknown };
+        };
+        if (obj.type !== 'message_start' && obj.type !== 'message_delta') continue;
+        const usage = obj.type === 'message_start' ? obj.message?.usage : obj.usage;
+        if (usage && typeof usage === 'object') {
+          const inT = usage.input_tokens;
+          const outT = usage.output_tokens;
+          if (typeof inT === 'number' || typeof outT === 'number') {
+            act?.addTokens(
+              typeof inT === 'number' ? inT : null,
+              typeof outT === 'number' ? outT : null,
+            );
+          }
+        }
+      } catch {
+        // Partial JSON at a chunk boundary — the remainder arrives later.
+      }
     }
   }
 
@@ -447,7 +542,22 @@ function trackStreamCompletion(
           controller.close();
           return;
         }
-        if (result.value) controller.enqueue(result.value);
+        if (result.value) {
+          if (act) {
+            const text = lineTail + decoder.decode(result.value, { stream: true });
+            const lastNewline = text.lastIndexOf('\n');
+            if (lastNewline >= 0) {
+              lineTail = text.slice(lastNewline + 1);
+              scanForUsage(text.slice(0, lastNewline + 1));
+            } else {
+              lineTail = text;
+            }
+            // Bound the partial-line buffer: a single SSE frame far larger
+            // than this is not a usage frame anyway.
+            if (lineTail.length > 16 * 1024) lineTail = '';
+          }
+          controller.enqueue(result.value);
+        }
       } catch (err) {
         finish();
         controller.error(err);

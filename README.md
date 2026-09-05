@@ -160,7 +160,15 @@ connect прописывает в настройках Claude Code переме�
   одновременно выполняется только одна проба, закрытие вкладки отменяет её
   и останавливает ротацию за ней;
 - баннер статистики: всего / активных / rate-limited / invalid / disabled /
-  in-flight.
+  in-flight;
+- **Key statistics** — накопительная статистика по каждому ключу (попытки,
+  успехи, rate-limited, invalid, ошибки, средняя задержка, токены in/out,
+  последний выбор); persists в `stats.json` и переживает рестарты;
+- **Recent requests** — лог последних запросов (исход, HTTP-статус,
+  длительность, попытки, причина ротации, токены; для стримов токены
+  добираются из SSE-кадров `message_start`/`message_delta` после завершения
+  потока); буфер в памяти, до 500 записей за сессию сервера; кнопки
+  «Clear log» и «Reset stats».
 
 Сохранения защищены от потери данных двумя механизмами: все POST-действия
 выполняют чтение-изменение-запись как один сериализованный шаг (`mutateConfig`),
@@ -176,6 +184,8 @@ API:
 | `GET` | `/v1/models` | список моделей апстрима (тоже через ротацию; без выбранной модели — 400) |
 | `GET` | `/api/config` | конфиг + живые статусы ключей |
 | `POST` | `/api/config` | действия: `save`, `setActiveGroup`, `resetGroupRateLimit`, `connect`, `disconnect`, `setModel` |
+| `GET` | `/api/activity` | лог последних запросов + накопительная статистика по ключам (`?limit=N`, до 500) |
+| `POST` | `/api/activity` | действия: `clearLogs` (очистить лог), `resetStats` (обнулить статистику) |
 | `POST` | `/api/shutdown` | остановка сервера из панели (при этом авто-disconnect) |
 
 Ручки `/api/*` закрыты от cross-site запросов (`localGuard`): POST из чужой
@@ -216,7 +226,9 @@ pnpm dev          # режим разработки (hot reload)
 - `src/lib/config.ts` — `config.json` (mtime-кеш, hot reload), `connectToClaude`/`disconnectFromClaude`, атомарная запись
 - `src/lib/localGuard.ts` — cross-site защита ручек `/api/*`
 - `src/lib/logger.ts` — цветные терминальные логи (метка ключа, ID запроса, причины ротации)
-- `config.json` — конфигурация с ключами (в `.gitignore`); `config.backup.json` — автоснимок пула перед перезаписью; `config.example.json` — шаблон
+- `src/lib/activity.ts` — лог запросов (кольцевой буфер на 500) и накопительная статистика по ключам (`stats.json`, debounce-персист)
+- `src/app/activity-panel.tsx` — панель «Key statistics» + «Recent requests» в дашборде
+- `config.json` — конфигурация с ключами (в `.gitignore`); `config.backup.json` — автоснимок пула перед перезаписью; `config.example.json` — шаблон; `stats.json` — накопительная статистика ключей (в `.gitignore`, рантайм-файл)
 - `install.ps1` / `update.ps1` — скрипты апстрима (к этой локальной копии не применяются)
 
 ## Лицензия

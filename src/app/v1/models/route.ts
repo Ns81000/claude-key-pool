@@ -38,6 +38,7 @@ import {
   logSeparator,
   nextRequestId,
 } from '@/lib/logger';
+import { startRequest } from '@/lib/activity';
 
 export const dynamic = 'force-dynamic';
 
@@ -45,8 +46,11 @@ export async function GET(req: NextRequest) {
   const config = loadConfig();
   const reqId = nextRequestId();
   const startTime = Date.now();
+  const act = startRequest(reqId, 'GET', '/v1/models');
+  act.setModel(config.selectedModel);
 
   if (!config.selectedModel) {
+    act.finish('no-pool', 400, 'no model selected');
     return NextResponse.json(
       { error: 'No model selected. Open http://localhost:9999 and select a model from the header.' },
       { status: 400 }
@@ -54,6 +58,7 @@ export async function GET(req: NextRequest) {
   }
 
   if (config.groups.length === 0) {
+    act.finish('no-pool', 400, 'no groups or keys configured');
     return NextResponse.json(
       { error: 'No groups or keys configured in Claude Key Pool. Open http://localhost:9999 and configure them.' },
       { status: 400 }
@@ -64,6 +69,7 @@ export async function GET(req: NextRequest) {
   // /v1/messages.
   const pauseRemainingMs = getUpstreamPauseRemainingMs();
   if (pauseRemainingMs > 0) {
+    act.finish('ip-paused', 429, `pool paused after IP-level 429 (${Math.ceil(pauseRemainingMs / 1000)}s left)`);
     return NextResponse.json(
       { error: `Upstream is rate-limited at the IP level; the pool paused for ${Math.ceil(pauseRemainingMs / 1000)}s.` },
       {
@@ -84,6 +90,7 @@ export async function GET(req: NextRequest) {
   if (flatPoolSize === 0) {
     // Not a rate limit: no enabled group matches the selected model at all.
     // Mirror the /v1/messages fix — an honest 400 instead of a misleading 429.
+    act.finish('no-pool', 400, `no enabled group serves model "${config.selectedModel}"`);
     return NextResponse.json(
       { error: `No enabled group in Claude Key Pool serves model "${config.selectedModel}". Open http://localhost:9999 and check group models / the selected model.` },
       { status: 400 },
@@ -100,6 +107,7 @@ export async function GET(req: NextRequest) {
     // waits for.
     if (req.signal.aborted) {
       proxyLog('WARN', candidate.key.email, `#${reqId} Client aborted during rotation → stopping`);
+      act.finish('aborted', 499, 'client aborted during rotation');
       return new Response('Client aborted', { status: 499 });
     }
 
@@ -114,6 +122,7 @@ export async function GET(req: NextRequest) {
 
     if (!group.targetUrl) {
       logRotation(reqId, key.email, `Group "${group.name}" has no target URL → marking all keys invalid`);
+      act.note(key.id, key.email, group.name, 'invalid', `group "${group.name}" has no target URL`);
       group.keys.forEach(k => markInvalid(k.id));
       continue;
     }
@@ -130,6 +139,7 @@ export async function GET(req: NextRequest) {
     const timer = setTimeout(() => controller.abort(), CONNECT_TIMEOUT_MS);
 
     let upstream: Response;
+    const upstreamStartedAt = Date.now();
     try {
       upstream = await fetch(targetUrl, {
         method: 'GET',
@@ -142,18 +152,22 @@ export async function GET(req: NextRequest) {
 
       if (req.signal.aborted) {
         proxyLog('WARN', key.email, `#${reqId} Client aborted models request`);
+        act.finish('aborted', 499, 'client aborted request');
         return new Response('Client aborted', { status: 499 });
       }
 
       const isTimeout = err && (err as { name?: string }).name === 'AbortError';
       if (isTimeout) {
         markKeySlow(key.id);
+        act.note(key.id, key.email, group.name, 'timeout', `models fetch timed out (${CONNECT_TIMEOUT_MS / 1000}s)`);
         logRotation(reqId, key.email, `Models fetch timed out (${CONNECT_TIMEOUT_MS / 1000}s) → marked slow`);
       } else if (isGroupLevelNetworkError(err)) {
         markProviderError(key.id);
+        act.note(key.id, key.email, group.name, 'network', `network failure (${fetchErrorCode(err)}) — group URL unreachable`);
         logRotation(reqId, key.email, `Network failure (${fetchErrorCode(err)}) — group URL unreachable → 5-min cooldown`);
       } else {
         markKeySlow(key.id);
+        act.note(key.id, key.email, group.name, 'slow', `models fetch failed: ${err instanceof Error ? err.message : String(err)}`);
         logRotation(reqId, key.email, `Models fetch failed: ${err instanceof Error ? err.message : String(err)} → marked slow`);
       }
       totalTransientFailures++;
@@ -166,12 +180,14 @@ export async function GET(req: NextRequest) {
       if (verdict.kind === 'invalid') {
         markInvalid(key.id);
         decrementInFlight(key.id);
+        act.note(key.id, key.email, group.name, 'invalid', '429 → key invalid/revoked');
         logRotation(reqId, key.email, `429 → key invalid/revoked`);
         continue;
       }
       if (verdict.kind === 'key-limited') {
         limitKeyFromHeaders(key.id, upstream.headers, group);
         decrementInFlight(key.id);
+        act.note(key.id, key.email, group.name, 'rate-limited', '429 → rate limited (key cooled down)');
         logRotation(reqId, key.email, `429 → rate limited (key cooled down)`);
         continue;
       }
@@ -179,6 +195,7 @@ export async function GET(req: NextRequest) {
       // instead of rotating (every key shares this machine's IP).
       pauseUpstream(IP_PAUSE_MS);
       decrementInFlight(key.id);
+      act.finish('ip-paused', 429, `IP-level 429 → pool paused ${IP_PAUSE_MS / 1000}s (key not blamed)`);
       logRotation(reqId, key.email, `429 → IP-level rate limit → pool paused ${IP_PAUSE_MS / 1000}s, error returned to client (key NOT cooled down)`);
       return NextResponse.json(verdict.payload ?? { error: 'Upstream IP-level rate limit' }, {
         status: 429,
@@ -190,6 +207,7 @@ export async function GET(req: NextRequest) {
       const verdict = await classify401(upstream);
       if (verdict.kind === 'client-rejected') {
         decrementInFlight(key.id);
+        act.finish('client-error', 401, 'upstream rejected this client (key not blamed)');
         logRotation(reqId, key.email, `401 → upstream rejected this client (key NOT marked invalid)`);
         return NextResponse.json(verdict.payload, {
           status: 401,
@@ -198,6 +216,7 @@ export async function GET(req: NextRequest) {
       }
       markInvalid(key.id);
       decrementInFlight(key.id);
+      act.note(key.id, key.email, group.name, 'invalid', '401 → key invalid (auth failure)');
       logRotation(reqId, key.email, `401 → key invalid (auth failure)`);
       continue;
     }
@@ -205,6 +224,7 @@ export async function GET(req: NextRequest) {
     if (upstream.status === 403) {
       markProviderError(key.id);
       decrementInFlight(key.id);
+      act.note(key.id, key.email, group.name, 'provider-error', '403 → provider error (transient)');
       logRotation(reqId, key.email, `403 → provider error (transient, 5-min cooldown)`);
       totalTransientFailures++;
       continue;
@@ -215,12 +235,14 @@ export async function GET(req: NextRequest) {
       if (failure.kind === 'invalid') {
         markInvalid(key.id);
         decrementInFlight(key.id);
+        act.note(key.id, key.email, group.name, 'invalid', `${upstream.status} → key invalid (body)`);
         logRotation(reqId, key.email, `${upstream.status} → key invalid (body)`);
         continue;
       }
       if (failure.kind === 'limited') {
         markLimited(key.id, computeCooldownUntil(upstream.headers, group));
         decrementInFlight(key.id);
+        act.note(key.id, key.email, group.name, 'rate-limited', `${upstream.status} → rate limit (body)`);
         logRotation(reqId, key.email, `${upstream.status} → rate limit (body)`);
         continue;
       }
@@ -228,10 +250,12 @@ export async function GET(req: NextRequest) {
         markProviderError(key.id);
         decrementInFlight(key.id);
         totalTransientFailures++;
+        act.note(key.id, key.email, group.name, 'provider-error', `${upstream.status} → upstream server error`);
         logRotation(reqId, key.email, `${upstream.status} → upstream server error`);
         continue;
       }
       decrementInFlight(key.id);
+      act.finish('client-error', upstream.status, `${upstream.status} client error forwarded`);
       return NextResponse.json(failure.payload ?? { error: 'Unknown error' }, {
         status: upstream.status,
         headers: buildResponseHeaders(upstream, false),
@@ -243,12 +267,15 @@ export async function GET(req: NextRequest) {
     if (!validation.valid) {
       markProviderError(key.id);
       decrementInFlight(key.id);
+      act.note(key.id, key.email, group.name, 'provider-error', `200 OK but ${validation.reason}`);
       logRotation(reqId, key.email, `200 OK but ${validation.reason} → provider error (rotating key)`);
       totalTransientFailures++;
       continue;
     }
 
     decrementInFlight(key.id);
+    act.noteSuccess(key.id, key.email, group.name, Date.now() - upstreamStartedAt);
+    act.finish('success', upstream.status);
     logRequestComplete(reqId, key.email, Date.now() - startTime);
     return new Response(textBody, {
       status: upstream.status,
@@ -257,6 +284,11 @@ export async function GET(req: NextRequest) {
   }
 
   logExhausted(reqId, totalCandidatesTried, flatPoolSize);
+  act.finish(
+    'exhausted',
+    totalCandidatesTried === 0 ? 429 : totalTransientFailures === totalCandidatesTried ? 502 : 429,
+    `all keys exhausted (tried ${totalCandidatesTried}/${flatPoolSize})`,
+  );
 
   if (totalCandidatesTried === 0) {
     return NextResponse.json({ error: 'All keys are rate-limited or invalid' }, { status: 429 });

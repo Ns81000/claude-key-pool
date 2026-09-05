@@ -39,6 +39,9 @@ yarn-error.log*
 /config.json
 /config.backup.json
 
+# local runtime statistics (per-key usage counters), regenerated at runtime
+/stats.json
+
 # local test artifacts
 /mock-upstream.mjs
 
