@@ -78,7 +78,10 @@ drive-by-защита, классификация 401). Локальные ко�
     ├─ 2. Заголовки: клиентская авторизация СТИРАЕТСЯ,
     │      User-Agent заменяется маской claude-cli/…,
     │      x-api-key: <ключ пула>, accept-encoding: identity
-    ├─ 3. Тело запроса уходит БЕЗ ИЗМЕНЕНИЙ — модель не подменяется
+    ├─ 3. Тело запроса уходит БЕЗ ИЗМЕНЕНИЙ — модель не подменяется.
+    │      Единственное исключение: суффикс размера контекста в имени
+    │      модели («glm-5.3[1m]» — метка 1M-окна клиента) срезается
+    │      и тело переписывается — апстрим такого имени не знает
     ▼
  agentrouter.org
     │
@@ -139,6 +142,8 @@ connect прописывает в настройках Claude Code переме�
 | `ANTHROPIC_DEFAULT_OPUS/SONNET/FABLE_MODEL` | `selectedModel` (`glm-5.3`) |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL` | `smallFastModel` (`glm-5.3`) |
 | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | `1` |
+| `CLAUDE_CODE_DISABLE_1M_CONTEXT` | `1` — модели пула не имеют нативного 1M-контекста; запрет избавляет CLI от выбора «[1m]»-варианта, из-за которого имя модели в запросе получало суффикс `[1m]` (см. ниже) |
+| `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | `200000` — окно контекста/авто-компактизации зафиксировано на 200k |
 | `CLAUDE_CODE_EFFORT_LEVEL` | `high` (также поле верхнего уровня `effortLevel`) |
 
 - Прежнее содержимое настроек сохраняется **целиком** в `config.backupSettings`

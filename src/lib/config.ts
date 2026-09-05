@@ -732,6 +732,14 @@ export function connectToClaude(config: AppConfig): AppConfig {
   settingsJson.env.ANTHROPIC_BASE_URL = 'http://localhost:9999';
   settingsJson.env.ANTHROPIC_API_KEY = 'sk-ant-dummy-rotated-by-key-pool-proxy-9999';
   settingsJson.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
+  // The pool's upstream models have no native 1M context. Left alone, a
+  // session that picked a 1M context variant sends "glm-5.3[1m]" — the CLI
+  // treats the bracket suffix as a context-size label — and the pool has to
+  // strip it per request (see route.ts). DISABLE_1M_CONTEXT stops the CLI
+  // from selecting/extending 1M variants at all; AUTO_COMPACT_WINDOW states
+  // the cap explicitly (the CLI's own recommendation when 1M is disabled).
+  settingsJson.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = '1';
+  settingsJson.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = '200000';
   const modelName = config.selectedModel || 'claude-opus-4-8';
   // The small/fast model serves background and auto-mode classifier requests.
   // Decoupling it from the main model keeps those tiny calls on a cheap fast
@@ -806,15 +814,7 @@ export function disconnectFromClaude(config: AppConfig): AppConfig {
         delete settingsJson.env.ANTHROPIC_BASE_URL;
         delete settingsJson.env.ANTHROPIC_API_KEY;
         delete settingsJson.env.ANTHROPIC_AUTH_TOKEN;
-        delete settingsJson.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;
-        for (const name of [
-          'ANTHROPIC_DEFAULT_OPUS_MODEL',
-          'ANTHROPIC_DEFAULT_SONNET_MODEL',
-          'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-          'ANTHROPIC_DEFAULT_FABLE_MODEL',
-          'ANTHROPIC_SMALL_FAST_MODEL',
-          'CLAUDE_CODE_EFFORT_LEVEL',
-        ]) {
+        for (const name of POOL_SETTINGS_ENV_KEYS) {
           delete settingsJson.env[name];
         }
         if (Object.keys(settingsJson.env).length === 0) delete settingsJson.env;
@@ -845,14 +845,7 @@ export function disconnectFromClaude(config: AppConfig): AppConfig {
       // names — 401 / "model not found" on every request.
       delete settingsJson.env.ANTHROPIC_API_KEY;
       delete settingsJson.env.ANTHROPIC_AUTH_TOKEN;
-      for (const name of [
-        'ANTHROPIC_DEFAULT_OPUS_MODEL',
-        'ANTHROPIC_DEFAULT_SONNET_MODEL',
-        'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-        'ANTHROPIC_DEFAULT_FABLE_MODEL',
-        'ANTHROPIC_SMALL_FAST_MODEL',
-        'CLAUDE_CODE_EFFORT_LEVEL',
-      ]) {
+      for (const name of POOL_SETTINGS_ENV_KEYS) {
         delete settingsJson.env[name];
       }
     }
@@ -878,6 +871,8 @@ const POOL_SETTINGS_ENV_KEYS = [
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
   'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
+  'CLAUDE_CODE_DISABLE_1M_CONTEXT',
+  'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
   'CLAUDE_CODE_EFFORT_LEVEL',
   'ANTHROPIC_DEFAULT_OPUS_MODEL',
   'ANTHROPIC_DEFAULT_SONNET_MODEL',
