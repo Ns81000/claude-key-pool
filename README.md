@@ -50,8 +50,8 @@ drive-by-защита, классификация 401). Локальные ко�
 
 | Параметр | Значение |
 |---|---|
-| Группа `group_agentrouter` | targetUrl `https://agentrouter.org`, model `glm-5.3`, карантин rate-limit 10 ч, **14 ключей** |
-| `selectedModel` | `glm-5.3` — в ротации участвуют только группы с этой моделью |
+| Группы `group_agentrouter*` | targetUrl `https://agentrouter.org`, карантин rate-limit 10 ч, **14 ключей** в каждой: `glm-5.3` (основная), `gpt-5.6-sol`, `deepseek-v4-flash` (добавлены 2026-09-05, те же ключи) |
+| `selectedModel` | `glm-5.3` — модель по умолчанию; меняется в панели или в сессии Claude Code (`/model`), маршрутизация идёт по модели запроса, перезапуск пула не нужен |
 | `smallFastModel` | `glm-5.3` (фоновые запросы Claude Code идут через ту же модель) |
 | `isConnected` | `true` — Claude Code подключён |
 
