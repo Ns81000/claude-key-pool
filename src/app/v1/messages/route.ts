@@ -126,6 +126,11 @@ export async function POST(req: NextRequest) {
   logSeparator();
   logRequestStart(reqId, 'POST', `/v1/messages`, isStream);
   proxyLog('INFO', undefined, `#${reqId} Model: ${model} (selected: ${config.selectedModel})`);
+  if (normalizedModel !== model) {
+    // Diagnostics for the [1m]-class defect without live probes: the pool
+    // terminal shows that the suffix was stripped and the body rewritten.
+    proxyLog('INFO', undefined, `#${reqId} Model suffix stripped: "${model}" -> "${normalizedModel}" (context-size label, not a model name)`);
+  }
 
   let totalCandidatesTried = 0;
   let totalTransientFailures = 0;
