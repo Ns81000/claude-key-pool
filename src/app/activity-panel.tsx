@@ -71,6 +71,19 @@ function OutcomeBadge({ outcome }: { outcome: RequestOutcome }) {
   );
 }
 
+// Which client profile a request/key usage belongs to: Kilo Code or Claude
+// Code (the default for header-less clients).
+function ClientBadge({ client }: { client: 'claude' | 'kilo' }) {
+  if (client !== 'kilo') {
+    return <span className="text-[11px] text-muted">claude</span>;
+  }
+  return (
+    <span className="inline-flex items-center px-2 py-0.5 rounded-[5px] text-[11px] font-medium whitespace-nowrap text-[color:var(--color-status-limited)] bg-[var(--color-status-limited-bg)]">
+      kilo
+    </span>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Panels
 // ---------------------------------------------------------------------------
@@ -114,6 +127,7 @@ function KeyStatisticsTable({ keys }: { keys: KeyStatsView[] }) {
             <th className={th}>Key</th>
             <th className={th}>Group</th>
             <th className={`${th} text-right`}>Requests</th>
+            <th className={th} title="Requests by client profile: Claude Code vs Kilo Code">Client split</th>
             <th className={`${th} text-right`}>OK</th>
             <th className={`${th} text-right`}>Limited</th>
             <th className={`${th} text-right`}>Invalid</th>
@@ -137,6 +151,23 @@ function KeyStatisticsTable({ keys }: { keys: KeyStatsView[] }) {
                 </td>
                 <td className={`${td} text-muted max-w-[140px] truncate`}>{k.groupName}</td>
                 <td className={`${td} text-right font-mono text-[12px]`}>{k.attempts}</td>
+                <td
+                  className={`${td} text-[12px] text-muted`}
+                  title={
+                    `claude: ${k.attemptsClaude} req · ${fmtTokens(k.inputTokensClaude)} in / ${fmtTokens(k.outputTokensClaude)} out\n` +
+                    `kilo: ${k.attemptsKilo} req · ${fmtTokens(k.inputTokensKilo)} in / ${fmtTokens(k.outputTokensKilo)} out`
+                  }
+                >
+                  {k.attemptsKilo > 0 || k.attemptsClaude > 0 ? (
+                    <>
+                      claude {k.attemptsClaude}
+                      <span className="mx-1 text-muted/50">·</span>
+                      kilo {k.attemptsKilo}
+                    </>
+                  ) : (
+                    '—'
+                  )}
+                </td>
                 <td className={`${td} text-right font-mono text-[12px] text-[color:var(--color-status-ready)]`}>{k.successes}</td>
                 <td className={`${td} text-right font-mono text-[12px] text-[color:var(--color-status-limited)]`}>
                   {k.rateLimited > 0 ? k.rateLimited : '—'}
@@ -185,12 +216,13 @@ function RequestsTable({ entries }: { entries: ActivityEntry[] }) {
   }
   return (
     <div className="border border-hairline rounded-[10px] overflow-x-auto">
-      <table className="w-full border-collapse min-w-[820px]">
+      <table className="w-full border-collapse min-w-[880px]">
         <thead className="bg-surface-soft">
           <tr>
             <th className={th}>Time</th>
             <th className={th}>#</th>
             <th className={th}>Path</th>
+            <th className={th}>Client</th>
             <th className={th}>Model</th>
             <th className={th}>Key</th>
             <th className={th}>Outcome</th>
@@ -209,6 +241,9 @@ function RequestsTable({ entries }: { entries: ActivityEntry[] }) {
               <td className={`${td} font-mono text-[12px]`}>
                 {e.method} {e.path}
                 {e.isStream && <span className="ml-1.5 text-[10px] text-[color:var(--color-status-limited)]">stream</span>}
+              </td>
+              <td className={td}>
+                <ClientBadge client={e.client ?? 'claude'} />
               </td>
               <td className={`${td} font-mono text-[12px] max-w-[140px] truncate`}>{e.model ?? '—'}</td>
               <td className={`${td} max-w-[160px] truncate`} title={e.groupName ?? undefined}>
@@ -340,6 +375,21 @@ export default function ActivityPanel() {
               <ArrowUpFromLine className="w-3 h-3 inline -mt-0.5" />{' '}
               <span className="text-ink font-medium font-mono">{fmtTokens(totals.outputTokens)}</span> out
             </span>
+            {(totals.attemptsKilo > 0 || totals.attemptsClaude > 0) && (
+              <span
+                className="whitespace-nowrap"
+                title={
+                  `claude: ${totals.attemptsClaude} attempts · ${fmtTokens(totals.inputTokensClaude)} in / ${fmtTokens(totals.outputTokensClaude)} out\n` +
+                  `kilo: ${totals.attemptsKilo} attempts · ${fmtTokens(totals.inputTokensKilo)} in / ${fmtTokens(totals.outputTokensKilo)} out`
+                }
+              >
+                <span className="text-muted">·</span> claude{' '}
+                <span className="text-ink font-medium font-mono">{totals.attemptsClaude}</span>
+                <span className="mx-1.5 text-muted/50">/</span>
+                kilo{' '}
+                <span className="text-ink font-medium font-mono text-[color:var(--color-status-limited)]">{totals.attemptsKilo}</span>
+              </span>
+            )}
           </div>
         )}
         <KeyStatisticsTable keys={snapshot?.keys ?? []} />

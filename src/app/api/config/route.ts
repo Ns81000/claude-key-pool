@@ -89,6 +89,12 @@ export async function POST(req: NextRequest) {
             if (cfg.isConnected) {
               try { connectToClaude(cfg); } catch { /* best-effort env sync */ }
             }
+            // Same best-effort sync for the Kilo profile: rewrites the
+            // provider entry in kilo.jsonc, so marker/header changes (e.g.
+            // x-app) reach an already-connected Kilo without a reconnect.
+            if (cfg.kiloConnected) {
+              try { connectToKilo(cfg); } catch { /* best-effort kilo.jsonc sync */ }
+            }
           },
           config && typeof config.configVersion === 'number'
             ? config.configVersion

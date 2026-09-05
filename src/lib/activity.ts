@@ -36,11 +36,17 @@ export type RequestOutcome =
   | 'no-pool' // no model / no groups / no group serves the model
   | 'rejected'; // request refused before rotation (parse error, upstream paused)
 
+// Which client profile a request came from. Kilo Code's provider entry sends
+// `x-app: kilo` (we author kilo.jsonc, so the marker is ours); Claude Code
+// sends `x-app: cli`, and anything else — curl, tests — defaults to claude.
+export type ClientProfile = 'claude' | 'kilo';
+
 export interface ActivityEntry {
   id: number; // same id the console logger prints (#NNN)
   ts: number; // ms epoch
   method: string;
   path: string;
+  client: ClientProfile;
   model: string | null;
   keyEmail: string | null; // key that produced the final outcome
   keyId: string | null;
@@ -69,6 +75,16 @@ export interface KeyStatsData {
   slowMarks: number; // generic fetch failures (key marked slow, not a group-URL problem)
   inputTokens: number;
   outputTokens: number;
+  // Per-client-profile split of the same usage (attempts / tokens). The
+  // headline fields above stay the source of truth; these answer "which
+  // client burned this key". Stats recorded before the split exist start at
+  // zero here while still counting in the headline fields.
+  attemptsClaude: number;
+  attemptsKilo: number;
+  inputTokensClaude: number;
+  outputTokensClaude: number;
+  inputTokensKilo: number;
+  outputTokensKilo: number;
   // Latency of the successful upstream call only (fetch → verdict), not of
   // the whole client request: rotation retries and client-side stream
   // consumption must not inflate the key's average.
@@ -95,6 +111,14 @@ export interface ActivitySnapshot {
     slowMarks: number;
     inputTokens: number;
     outputTokens: number;
+    // Per-client-profile split (same caveat as in KeyStatsData: starts at
+    // zero for history recorded before the split existed).
+    attemptsClaude: number;
+    attemptsKilo: number;
+    inputTokensClaude: number;
+    outputTokensClaude: number;
+    inputTokensKilo: number;
+    outputTokensKilo: number;
   };
   serverStartedAt: number;
   logCapacity: number;
@@ -144,6 +168,12 @@ function emptyKeyStats(label: string, groupName: string): KeyStatsData {
     slowMarks: 0,
     inputTokens: 0,
     outputTokens: 0,
+    attemptsClaude: 0,
+    attemptsKilo: 0,
+    inputTokensClaude: 0,
+    outputTokensClaude: 0,
+    inputTokensKilo: 0,
+    outputTokensKilo: 0,
     successUpstreamMs: 0,
     lastUsedAt: null,
   };
@@ -203,6 +233,7 @@ function bumpKeyStat(
   label: string,
   groupName: string,
   outcome: AttemptOutcome,
+  client: ClientProfile = 'claude',
 ): void {
   loadStatsOnce();
   const st = (state.keyStats[keyId] ??= emptyKeyStats(label, groupName));
@@ -210,6 +241,7 @@ function bumpKeyStat(
   st.label = label;
   st.groupName = groupName;
   st.attempts++;
+  if (client === 'kilo') st.attemptsKilo++; else st.attemptsClaude++;
   st.lastUsedAt = Date.now();
   switch (outcome) {
     case 'success': st.successes++; break;
@@ -235,6 +267,7 @@ export class RequestTracker {
   readonly id: number;
   readonly method: string;
   readonly path: string;
+  readonly client: ClientProfile;
   readonly startedAt: number;
   model: string | null = null;
   isStream = false;
@@ -252,10 +285,11 @@ export class RequestTracker {
   private finished = false;
   private entry: ActivityEntry | null = null; // set by finish(), patched later by addTokens()
 
-  constructor(id: number, method: string, path: string) {
+  constructor(id: number, method: string, path: string, client: ClientProfile = 'claude') {
     this.id = id;
     this.method = method;
     this.path = path;
+    this.client = client;
     this.startedAt = Date.now();
   }
 
@@ -284,8 +318,16 @@ export class RequestTracker {
     if (this.lastKeyId) {
       const st = state.keyStats[this.lastKeyId];
       if (st && (inT !== null || outT !== null)) {
-        if (inT !== null) st.inputTokens += Math.max(0, inT - (this.prevStatIn ?? 0));
-        if (outT !== null) st.outputTokens += Math.max(0, outT - (this.prevStatOut ?? 0));
+        if (inT !== null) {
+          const d = Math.max(0, inT - (this.prevStatIn ?? 0));
+          st.inputTokens += d;
+          if (this.client === 'kilo') st.inputTokensKilo += d; else st.inputTokensClaude += d;
+        }
+        if (outT !== null) {
+          const d = Math.max(0, outT - (this.prevStatOut ?? 0));
+          st.outputTokens += d;
+          if (this.client === 'kilo') st.outputTokensKilo += d; else st.outputTokensClaude += d;
+        }
         if (inT !== null) this.prevStatIn = Math.max(this.prevStatIn ?? 0, inT);
         if (outT !== null) this.prevStatOut = Math.max(this.prevStatOut ?? 0, outT);
         scheduleStatsSave();
@@ -313,7 +355,7 @@ export class RequestTracker {
     this.lastKeyEmail = keyEmail;
     this.lastGroupName = groupName;
     this.lastNote = note ?? this.lastNote;
-    bumpKeyStat(keyId, keyEmail, groupName, outcome);
+    bumpKeyStat(keyId, keyEmail, groupName, outcome, this.client);
   }
 
   // Successful attempt: per-key stats plus the upstream latency (fetch →
@@ -330,7 +372,7 @@ export class RequestTracker {
     this.lastKeyId = keyId;
     this.lastKeyEmail = keyEmail;
     this.lastGroupName = groupName;
-    bumpKeyStat(keyId, keyEmail, groupName, 'success');
+    bumpKeyStat(keyId, keyEmail, groupName, 'success', this.client);
     const st = state.keyStats[keyId];
     if (st) {
       st.successUpstreamMs += upstreamMs;
@@ -346,6 +388,7 @@ export class RequestTracker {
       ts: Date.now(),
       method: this.method,
       path: this.path,
+      client: this.client,
       model: this.model,
       keyEmail: this.lastKeyEmail,
       keyId: this.lastKeyId,
@@ -380,8 +423,13 @@ export class RequestTracker {
   }
 }
 
-export function startRequest(reqId: number, method: string, path: string): RequestTracker {
-  return new RequestTracker(reqId, method, path);
+export function startRequest(
+  reqId: number,
+  method: string,
+  path: string,
+  client: ClientProfile = 'claude',
+): RequestTracker {
+  return new RequestTracker(reqId, method, path, client);
 }
 
 // ---------------------------------------------------------------------------
@@ -398,7 +446,7 @@ export function getActivitySnapshot(limit: number): ActivitySnapshot {
   // Most recently used first — matches how an operator scans the table.
   keys.sort((a, b) => (b.lastUsedAt ?? 0) - (a.lastUsedAt ?? 0));
 
-  const totals = { attempts: 0, successes: 0, rateLimited: 0, invalid: 0, providerErrors: 0, networkErrors: 0, timeouts: 0, slowMarks: 0, inputTokens: 0, outputTokens: 0 };
+  const totals = { attempts: 0, successes: 0, rateLimited: 0, invalid: 0, providerErrors: 0, networkErrors: 0, timeouts: 0, slowMarks: 0, inputTokens: 0, outputTokens: 0, attemptsClaude: 0, attemptsKilo: 0, inputTokensClaude: 0, outputTokensClaude: 0, inputTokensKilo: 0, outputTokensKilo: 0 };
   for (const st of Object.values(state.keyStats)) {
     totals.attempts += st.attempts;
     totals.successes += st.successes;
@@ -410,6 +458,12 @@ export function getActivitySnapshot(limit: number): ActivitySnapshot {
     totals.slowMarks += st.slowMarks;
     totals.inputTokens += st.inputTokens;
     totals.outputTokens += st.outputTokens;
+    totals.attemptsClaude += st.attemptsClaude;
+    totals.attemptsKilo += st.attemptsKilo;
+    totals.inputTokensClaude += st.inputTokensClaude;
+    totals.outputTokensClaude += st.outputTokensClaude;
+    totals.inputTokensKilo += st.inputTokensKilo;
+    totals.outputTokensKilo += st.outputTokensKilo;
   }
 
   return {

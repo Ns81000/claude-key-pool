@@ -63,9 +63,13 @@ export async function POST(req: NextRequest) {
   const config = loadConfig();
   const reqId = nextRequestId();
   const startTime = Date.now();
+  // Client profile: Kilo's provider entry sends `x-app: kilo` (the pool
+  // authors kilo.jsonc, so the marker is ours); Claude Code sends `cli`,
+  // everything else defaults to the claude profile.
+  const client = req.headers.get('x-app')?.toLowerCase() === 'kilo' ? 'kilo' as const : 'claude' as const;
   // Activity tracker: feeds the dashboard log + per-key stats. Same id as
   // the console logger prints, so #NNN lines match across terminal and panel.
-  const act = startRequest(reqId, 'POST', '/v1/messages');
+  const act = startRequest(reqId, 'POST', '/v1/messages', client);
 
   if (!config.selectedModel) {
     proxyLog('ERROR', undefined, `#${reqId} No model selected`);
@@ -154,7 +158,7 @@ export async function POST(req: NextRequest) {
   }
 
   logSeparator();
-  logRequestStart(reqId, 'POST', `/v1/messages`, isStream);
+  logRequestStart(reqId, 'POST', `/v1/messages`, isStream, client);
   proxyLog('INFO', undefined, `#${reqId} Model: ${model} (selected: ${config.selectedModel})`);
   if (normalizedModel !== model) {
     // Diagnostics for the [1m]-class defect without live probes: the pool
@@ -396,7 +400,7 @@ export async function POST(req: NextRequest) {
 
       act.noteSuccess(key.id, key.email, group.name, Date.now() - upstreamStartedAt);
       act.finish('success', 200);
-      logRequestComplete(reqId, key.email, Date.now() - startTime);
+      logRequestComplete(reqId, key.email, Date.now() - startTime, client);
       proxyLog('SUCCESS', key.email, `#${reqId} Streaming response to client...`);
 
       // Decrement inFlight when the stream finishes (success or error).
@@ -467,7 +471,7 @@ export async function POST(req: NextRequest) {
       );
     }
     act.finish('success', upstream.status);
-    logRequestComplete(reqId, key.email, Date.now() - startTime);
+    logRequestComplete(reqId, key.email, Date.now() - startTime, client);
     return new Response(textBody, {
       status: upstream.status,
       statusText: upstream.statusText,

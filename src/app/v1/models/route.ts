@@ -51,7 +51,9 @@ export async function GET(req: NextRequest) {
   const config = loadConfig();
   const reqId = nextRequestId();
   const startTime = Date.now();
-  const act = startRequest(reqId, 'GET', '/v1/models');
+  // Same client-profile marker as /v1/messages (`x-app: kilo` from Kilo).
+  const client = req.headers.get('x-app')?.toLowerCase() === 'kilo' ? 'kilo' as const : 'claude' as const;
+  const act = startRequest(reqId, 'GET', '/v1/models', client);
   act.setModel(config.selectedModel);
 
   if (!config.selectedModel) {
@@ -85,7 +87,7 @@ export async function GET(req: NextRequest) {
   }
 
   logSeparator();
-  logRequestStart(reqId, 'GET', `/v1/models`);
+  logRequestStart(reqId, 'GET', `/v1/models`, false, client);
 
   let totalCandidatesTried = 0;
   let totalTransientFailures = 0;

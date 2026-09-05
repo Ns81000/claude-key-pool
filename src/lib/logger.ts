@@ -99,10 +99,18 @@ export function logSeparator() {
   console.log(`${DIM}${'─'.repeat(70)}${RESET}`);
 }
 
-// Log incoming request with a tracking ID
-export function logRequestStart(reqId: number, method: string, path: string, isStream?: boolean) {
+// Log incoming request with a tracking ID. The client tag separates the
+// Kilo Code profile from Claude Code in the terminal tail.
+export function logRequestStart(
+  reqId: number,
+  method: string,
+  path: string,
+  isStream?: boolean,
+  client?: 'claude' | 'kilo',
+) {
   const streamTag = isStream ? ` ${CYAN}[stream]${RESET}` : '';
-  proxyLog('REQUEST', undefined, `#${reqId} ${BOLD}${method} ${path}${RESET}${streamTag}`);
+  const clientTag = client === 'kilo' ? ` ${MAGENTA}[kilo]${RESET}` : '';
+  proxyLog('REQUEST', undefined, `#${reqId} ${BOLD}${method} ${path}${RESET}${streamTag}${clientTag}`);
 }
 
 // Log which key was selected for a request
@@ -112,11 +120,17 @@ export function logKeySelected(reqId: number, keyEmail: string, groupName: strin
 }
 
 // Log request completion
-export function logRequestComplete(reqId: number, keyEmail: string, durationMs: number) {
+export function logRequestComplete(
+  reqId: number,
+  keyEmail: string,
+  durationMs: number,
+  client?: 'claude' | 'kilo',
+) {
   const dur = durationMs < 1000
     ? `${durationMs}ms`
     : `${(durationMs / 1000).toFixed(1)}s`;
-  proxyLog('SUCCESS', keyEmail, `#${reqId} Completed in ${BOLD}${dur}${RESET}`);
+  const clientTag = client === 'kilo' ? ` ${MAGENTA}[kilo]${RESET}` : '';
+  proxyLog('SUCCESS', keyEmail, `#${reqId} Completed in ${BOLD}${dur}${RESET}${clientTag}`);
 }
 
 // Log a rotation event

@@ -552,9 +552,10 @@ export function connectToKilo(config: AppConfig): AppConfig {
       headers: {
         // agentrouter rejects non-approved clients by User-Agent; Kilo's
         // fetch cannot set it (forbidden header), so the pool masks it
-        // upstream-side anyway (buildUpstreamHeaders). The x-app marker
-        // mirrors what Claude Code sends.
-        'x-app': 'cli',
+        // upstream-side anyway (buildUpstreamHeaders). The x-app marker is
+        // the pool's own: it distinguishes Kilo traffic from Claude Code's
+        // `x-app: cli` in logs and statistics.
+        'x-app': 'kilo',
       },
     },
     models,
