@@ -13,6 +13,7 @@ import {
   resetKeysStatus,
 } from '@/lib/config';
 import { rejectCrossSiteRequest } from '@/lib/localGuard';
+import { triggerKiloReload } from '@/lib/kiloReload';
 
 export const dynamic = 'force-dynamic';
 
@@ -141,18 +142,24 @@ export async function POST(req: NextRequest) {
 
     // Kilo Code profile — independent of the Claude CLI one: both may be
     // connected at once, either alone, or neither. Same pool, same port.
+    // After kilo.jsonc is written, the running Kilo server is told to
+    // re-read it (the plugin's "Reload" button logic), so the model list
+    // in the session window updates without a manual reload. Best-effort:
+    // the outcome is reported alongside the config, never fatal.
     if (action === 'kiloConnect') {
       const current = await mutateConfig((cfg) => {
         connectToKilo(cfg); // throws before writing on failure
       });
-      return NextResponse.json(buildConfigView(current));
+      const kiloReload = await triggerKiloReload();
+      return NextResponse.json({ ...buildConfigView(current), kiloReload });
     }
 
     if (action === 'kiloDisconnect') {
       const current = await mutateConfig((cfg) => {
         disconnectFromKilo(cfg);
       });
-      return NextResponse.json(buildConfigView(current));
+      const kiloReload = await triggerKiloReload();
+      return NextResponse.json({ ...buildConfigView(current), kiloReload });
     }
 
     if (action === 'setModel') {

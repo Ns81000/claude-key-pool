@@ -736,11 +736,20 @@ export default function Home() {
     if (!config) return;
     const action = config.kiloConnected ? 'kiloDisconnect' : 'kiloConnect';
     try {
-      await post({ action });
+      const res = await post({ action });
+      // The server also asked the running Kilo server to re-read kilo.jsonc
+      // (the plugin's "Reload" button logic). 'kilo-not-running' is the
+      // normal case when Kilo isn't open; 'session-running' means the reload
+      // must wait until the active Kilo session finishes.
+      const reload = (res as { kiloReload?: { status?: string } } | null)?.kiloReload;
+      let reloadNote = '';
+      if (reload?.status === 'reloaded') reloadNote = ' — Kilo model list reloaded';
+      else if (reload?.status === 'session-running') reloadNote = ' — a Kilo session is active, click Reload in Kilo after it finishes';
+      else if (reload?.status && reload.status !== 'kilo-not-running') reloadNote = ` — Kilo reload: ${reload.status}`;
       pushToast(
-        action === 'kiloConnect'
+        (action === 'kiloConnect'
           ? 'Connected to Kilo Code (provider "claude-key-pool" added to kilo.jsonc)'
-          : 'Disconnected from Kilo Code (provider removed)',
+          : 'Disconnected from Kilo Code (provider removed)') + reloadNote,
       );
     } catch (err) {
       pushToast(err instanceof Error ? err.message : 'Kilo connection failed', 'error');
