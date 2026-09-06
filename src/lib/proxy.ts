@@ -32,6 +32,11 @@ const LIMIT_ERROR_SUBSTRINGS = [
   'concurrency',
   'throttled',
   'payment required',
+  // OpenAI-compatible aggregators (OpenRouter and peers):
+  'rate limit exceeded',
+  'exceeded your quota',
+  'insufficient_quota',
+  'quota exceeded',
 ];
 
 // Strings/types that mean "this key is invalid/revoked/billing failed → do not use".
@@ -56,6 +61,12 @@ const INVALID_ERROR_SUBSTRINGS = [
   'quota exceeded',
   'credit card',
   'billing status',
+  // OpenAI-compatible aggregators (OpenRouter and peers):
+  'no auth credentials',
+  'invalid api key provided',
+  'insufficient credits',
+  'account balance is too low',
+  'not enough credits',
 ];
 
 export function isLimitError(errType?: string, errMsg?: string): boolean {
@@ -145,6 +156,19 @@ export function computeCooldownUntil(headers: Headers, group?: GroupConfig): num
         if (secs > 1e12) return secs; // ms epoch already
         if (secs > 1e6) return secs * 1000; // s epoch
         return now + secs * 1000; // relative seconds
+      }
+      const dateMs = Date.parse(value);
+      if (Number.isFinite(dateMs)) return Math.max(now + 1000, dateMs);
+    }
+    // OpenRouter sends the reset instant as X-RateLimit-Reset (epoch
+    // seconds). The same seconds/milliseconds/relative disambiguation as
+    // the anthropic-ratelimit-* headers applies.
+    if (lower === 'x-ratelimit-reset') {
+      const secs = Number(value);
+      if (Number.isFinite(secs) && secs > 0) {
+        if (secs > 1e12) return secs;
+        if (secs > 1e6) return secs * 1000;
+        return now + secs * 1000;
       }
       const dateMs = Date.parse(value);
       if (Number.isFinite(dateMs)) return Math.max(now + 1000, dateMs);
