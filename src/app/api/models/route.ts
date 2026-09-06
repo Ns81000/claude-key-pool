@@ -20,6 +20,20 @@ export async function GET(req: NextRequest) {
     if (seen.has(group.model)) continue;
     seen.add(group.model);
     models.push({ model: group.model, name: group.name });
+    // OpenAI-protocol groups: the group.model is the Anthropic-facing name
+    // (what clients request); any modelMapping aliases map to the same
+    // upstream. Expose the mapping keys as selectable models too, so a
+    // client asking for the mapped name routes into this group. Minimum
+    // viable /api/models for openai groups (spec §7, stage 3 optional
+    // upstream fetch not implemented).
+    if (group.protocol === 'openai' && group.modelMapping) {
+      for (const anthropicName of Object.keys(group.modelMapping)) {
+        if (!seen.has(anthropicName)) {
+          seen.add(anthropicName);
+          models.push({ model: anthropicName, name: group.name });
+        }
+      }
+    }
   }
   return NextResponse.json({ models });
 }

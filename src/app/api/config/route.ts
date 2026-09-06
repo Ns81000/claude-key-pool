@@ -27,6 +27,19 @@ function sanitizeGroups(groups: unknown): GroupConfig[] {
     model: typeof g.model === 'string' && g.model ? g.model : undefined,
     rateLimitCooldownHours: typeof g.rateLimitCooldownHours === 'number' ? g.rateLimitCooldownHours : undefined,
     disabled: g.disabled === true ? true : undefined,
+    protocol: g.protocol === 'openai' ? 'openai' : undefined,
+    chatCompletionsPath:
+      typeof g.chatCompletionsPath === 'string' && g.chatCompletionsPath
+        ? g.chatCompletionsPath
+        : undefined,
+    modelMapping:
+      g.modelMapping && typeof g.modelMapping === 'object' && !Array.isArray(g.modelMapping)
+        ? Object.fromEntries(
+            Object.entries(g.modelMapping as Record<string, unknown>)
+              .filter(([, v]) => typeof v === 'string')
+              .map(([k, v]) => [String(k), String(v)]),
+          )
+        : undefined,
     keys: Array.isArray(g.keys)
       ? g.keys.map((k: Record<string, unknown>) => ({
           id: String(k.id),

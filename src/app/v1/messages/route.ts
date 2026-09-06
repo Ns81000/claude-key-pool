@@ -23,9 +23,11 @@ import {
   classifyInvalidPayload,
   classifyUpstreamFailure,
   computeCooldownUntil,
+  createStallProtectedStream,
   fetchErrorCode,
   isGroupLevelNetworkError,
   limitKeyFromHeaders,
+  MASK_USER_AGENT,
   peekStreamForLimit,
   validateNonStreamingResponseBody,
   getNextCandidate,
@@ -43,11 +45,152 @@ import {
 } from '@/lib/logger';
 import { RequestTracker, startRequest } from '@/lib/activity';
 import { rejectCrossSiteRequest } from '@/lib/localGuard';
+import {
+  AnthropicRequestBody,
+  translateRequest,
+  translateStream,
+  translateOpenAiCompletion,
+  findUnknownBlockTypes,
+} from '@/lib/translate';
 
 export const dynamic = 'force-dynamic';
 
 function errorJson(type: string, message: string, status: number) {
   return NextResponse.json({ error: { type, message } }, { status });
+}
+
+// Upstream headers for an openai-protocol group: same masking rules as
+// buildUpstreamHeaders (strip client auth, mask UA, identity encoding), but
+// auth rides Authorization: Bearer (OpenAI convention) instead of x-api-key,
+// and the Anthropic-only version header is dropped.
+export function buildOpenAiBridgeHeaders(clientHeaders: Headers, apiKey: string): Headers {
+  const headers = new Headers();
+  for (const [name, value] of clientHeaders.entries()) {
+    const lower = name.toLowerCase();
+    if (
+      lower === 'host' ||
+      lower === 'content-length' ||
+      lower === 'connection' ||
+      lower === 'x-api-key' ||
+      lower === 'authorization' ||
+      lower === 'user-agent' ||
+      lower === 'anthropic-version' ||
+      lower === 'anthropic-beta'
+    ) {
+      continue;
+    }
+    headers.set(name, value);
+  }
+  headers.set('content-type', 'application/json');
+  headers.set('user-agent', MASK_USER_AGENT);
+  headers.set('authorization', `Bearer ${apiKey}`);
+  headers.set('accept-encoding', 'identity');
+  return headers;
+}
+
+// Response headers for the translated Anthropic SSE stream we synthesize.
+function anthropicSseHeaders(): Headers {
+  const headers = new Headers();
+  headers.set('content-type', 'text/event-stream; charset=utf-8');
+  headers.set('cache-control', 'no-cache, no-transform');
+  headers.set('connection', 'keep-alive');
+  return headers;
+}
+
+// Peek a TRANSLATED Anthropic SSE stream for a limit error before content.
+// Same semantics as peekStreamForLimit (rotate before any content reached
+// the client, forward after), but the input is our own translator's output,
+// so the error frames are Anthropic-shaped and detectLimitInSseText in
+// proxy.ts understands them directly. Bounded buffering: stop as soon as
+// content starts.
+async function peekAnthropicSseForLimit(
+  stream: ReadableStream<Uint8Array>,
+): Promise<{ limited: boolean; stream: ReadableStream<Uint8Array> | null }> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  const headChunks: Uint8Array[] = [];
+  let text = '';
+  const deadline = Date.now() + 8_000;
+  let limited = false;
+
+  while (headChunks.length === 0 || Date.now() < deadline) {
+    let chunk;
+    try {
+      chunk = await reader.read();
+    } catch {
+      break;
+    }
+    if (chunk.done) break;
+    if (!chunk.value) continue;
+    headChunks.push(chunk.value);
+    text += decoder.decode(chunk.value, { stream: true });
+    // The translator emits message_start/content_block_start almost
+    // immediately; an error event before content means rotate.
+    const lines = text.split(/\r?\n/);
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) continue;
+      const jsonStr = trimmed.slice(5).trim();
+      if (!jsonStr) continue;
+      try {
+        const obj = JSON.parse(jsonStr) as { type?: string };
+        if (obj.type === 'message_start' || obj.type === 'content_block_start' || obj.type === 'content_block_delta') {
+          // Content is flowing — replay and forward.
+          const replay = createReplayStream(headChunks, reader);
+          return { limited: false, stream: replay };
+        }
+        if (obj.type === 'error') {
+          limited = true;
+          break;
+        }
+      } catch {
+        /* partial JSON at the buffer edge */
+      }
+    }
+    if (limited) break;
+  }
+
+  if (limited) {
+    try {
+      await reader.cancel();
+    } catch {
+      /* ignore */
+    }
+    return { limited: true, stream: null };
+  }
+
+  // Timeout/EOF without content and without a limit error — replay what we
+  // have and forward the rest.
+  return { limited: false, stream: createReplayStream(headChunks, reader) };
+}
+
+// Replay buffered head chunks, then pipe the rest of the reader.
+function createReplayStream(
+  headChunks: Uint8Array[],
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      for (const c of headChunks) controller.enqueue(c);
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) controller.enqueue(value);
+        }
+        controller.close();
+      } catch (err) {
+        try {
+          controller.error(err);
+        } catch {
+          /* already closed */
+        }
+      }
+    },
+    cancel(reason) {
+      reader.cancel(reason).catch(() => {});
+    },
+  });
 }
 
 export async function POST(req: NextRequest) {
@@ -169,6 +312,37 @@ export async function POST(req: NextRequest) {
   let totalCandidatesTried = 0;
   let totalTransientFailures = 0;
 
+  // Protocol bridge: for openai-protocol groups the parsed Anthropic body is
+  // translated ONCE before the rotation loop (the translation does not
+  // depend on the key); the loop below then sends the same OpenAI body to
+  // every candidate. targetUrl per group uses chatCompletionsPath.
+  const openaiBridge = (() => {
+    // Route by the request model exactly like the anthropic path does, so
+    // the translation picks the right group's modelMapping before rotation.
+    const probeModel =
+      model !== 'unknown' && buildFlatPool(config, model).length > 0
+        ? model
+        : config.selectedModel;
+    const probeGroup = buildFlatPool(config, probeModel)[0]?.group;
+    if (probeGroup?.protocol !== 'openai') return null;
+    const translated = translateRequest(parsed as AnthropicRequestBody, {
+      modelMapping: probeGroup.modelMapping,
+    });
+    const unknownBlocks = findUnknownBlockTypes(parsed as AnthropicRequestBody);
+    if (unknownBlocks.length > 0) {
+      proxyLog(
+        'WARN',
+        undefined,
+        `#${reqId} OpenAI bridge: dropped unknown content block type(s) ${[...new Set(unknownBlocks)].join(', ')} (forward-compatible passthrough)`,
+      );
+    }
+    return {
+      body: JSON.stringify(translated),
+      chatCompletionsPath: probeGroup.chatCompletionsPath || '/v1/chat/completions',
+      modelMapping: probeGroup.modelMapping,
+    };
+  })();
+
   // Route by the model the request actually carries when the pool has a group
   // for it: background/auto-mode requests carry smallFastModel and must reach
   // that model's group, not the main one. Fall back to the dashboard
@@ -228,7 +402,10 @@ export async function POST(req: NextRequest) {
       continue;
     }
 
-    const targetUrl = `${group.targetUrl.replace(/\/$/, '')}/v1/messages`;
+    const isProtocolOpenai = group.protocol === 'openai';
+    const targetUrl = isProtocolOpenai
+      ? `${group.targetUrl.replace(/\/$/, '')}${openaiBridge?.chatCompletionsPath || group.chatCompletionsPath || '/v1/chat/completions'}`
+      : `${group.targetUrl.replace(/\/$/, '')}/v1/messages`;
 
     totalCandidatesTried++;
     incrementInFlight(key.id);
@@ -244,8 +421,10 @@ export async function POST(req: NextRequest) {
     try {
       upstream = await fetch(targetUrl, {
         method: 'POST',
-        headers: buildUpstreamHeaders(req.headers, key.key),
-        body: forwardBody,
+        headers: isProtocolOpenai
+          ? buildOpenAiBridgeHeaders(req.headers, key.key)
+          : buildUpstreamHeaders(req.headers, key.key),
+        body: isProtocolOpenai && openaiBridge ? openaiBridge.body : forwardBody,
         signal: controller.signal,
       });
     } catch (err) {
@@ -380,6 +559,45 @@ export async function POST(req: NextRequest) {
 
     // Success path.
     if (isStream) {
+      // OpenAI-protocol group: translate the upstream OpenAI SSE into
+      // Anthropic SSE. The stall-protected raw stream sits upstream of the
+      // translator; peek/mid-stream rotation happens BELOW on the translated
+      // Anthropic frames (detectLimitInSseText already understands the
+      // Anthropic event shape this translator emits), so the same
+      // before/after-content rotation boundary applies.
+      if (isProtocolOpenai && upstream.body) {
+        const stallProtected = createStallProtectedStream(upstream.body.getReader());
+        const translated = translateStream(stallProtected, {
+          onAborted: (reason) => {
+            proxyLog('WARN', key.email, `#${reqId} OpenAI bridge: upstream stream aborted (${reason}) → synthetic end_turn sent to client`);
+            act?.rewriteOutcome?.('provider-error', 200, `openai bridge stream aborted: ${reason}`);
+          },
+        });
+        const peek = await peekAnthropicSseForLimit(translated);
+        if (peek.limited) {
+          limitKeyFromHeaders(key.id, upstream.headers, group);
+          decrementInFlight(key.id);
+          act.note(key.id, key.email, group.name, 'rate-limited', 'mid-stream limit detected before content (openai bridge)');
+          logRotation(reqId, key.email, `Mid-stream limit detected before content (openai bridge)`);
+          continue;
+        }
+
+        act.noteSuccess(key.id, key.email, group.name, Date.now() - upstreamStartedAt);
+        act.finish('success', 200);
+        logRequestComplete(reqId, key.email, Date.now() - startTime, client);
+        proxyLog('SUCCESS', key.email, `#${reqId} Streaming translated response to client...`);
+
+        const keyId = key.id;
+        const keyEmail = key.email;
+        const trackedStream = peek.stream
+          ? trackStreamCompletion(peek.stream, keyId, keyEmail, reqId, act)
+          : null;
+        return new Response(trackedStream, {
+          status: 200,
+          headers: anthropicSseHeaders(),
+        });
+      }
+
       const peek = await peekStreamForLimit(upstream);
       if (peek.limited) {
         limitKeyFromHeaders(key.id, upstream.headers, group);
@@ -442,6 +660,41 @@ export async function POST(req: NextRequest) {
       act.note(key.id, key.email, group.name, 'provider-error', `200 OK but ${validation.reason}`);
       logRotation(reqId, key.email, `200 OK but ${validation.reason} → provider error (rotating key)`);
       totalTransientFailures++;
+      continue;
+    }
+
+    // OpenAI-protocol group, non-streaming: the 200 body is an OpenAI
+    // chat.completion — translate it into an Anthropic message before the
+    // payload-level classifiers run (they then see Anthropic-shaped errors
+    // only, and the client receives Anthropic JSON).
+    if (isProtocolOpenai && openaiBridge) {
+      const translated = translateOpenAiCompletion(validation.payload);
+      if (translated) {
+        decrementInFlight(key.id);
+        act.noteSuccess(key.id, key.email, group.name, Date.now() - upstreamStartedAt);
+        const usage = translated.usage;
+        if (usage) {
+          act.addTokens(
+            typeof usage.input_tokens === 'number' ? usage.input_tokens : null,
+            typeof usage.output_tokens === 'number' ? usage.output_tokens : null,
+          );
+        }
+        act.finish('success', 200);
+        logRequestComplete(reqId, key.email, Date.now() - startTime, client);
+        const jsonHeaders = new Headers();
+        jsonHeaders.set('content-type', 'application/json');
+        return new Response(JSON.stringify(translated), {
+          status: 200,
+          headers: jsonHeaders,
+        });
+      }
+      // Not a recognizable chat.completion (aggregator oddity) — treat as a
+      // provider error and rotate.
+      markProviderError(key.id);
+      decrementInFlight(key.id);
+      totalTransientFailures++;
+      act.note(key.id, key.email, group.name, 'provider-error', '200 OK but not a chat.completion payload (openai bridge)');
+      logRotation(reqId, key.email, `200 OK but not a chat.completion payload (openai bridge) → provider error (rotating key)`);
       continue;
     }
 

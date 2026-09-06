@@ -20,6 +20,19 @@ export interface GroupConfig {
   model?: string;
   rateLimitCooldownHours?: number;
   disabled?: boolean;
+  // Upstream wire protocol of the group. "anthropic" (default) forwards
+  // /v1/messages as-is; "openai" runs the protocol bridge: Anthropic in →
+  // POST {targetUrl}{chatCompletionsPath} → OpenAI SSE/JSON out, translated
+  // back to Anthropic events for the client. Rotation/classification/
+  // cooldown mechanics are protocol-agnostic and unchanged.
+  protocol?: 'anthropic' | 'openai';
+  // Custom chat-completions path for aggregators whose base differs.
+  // Only meaningful with protocol "openai"; default /v1/chat/completions.
+  chatCompletionsPath?: string;
+  // Anthropic model name (what clients request and /api/models shows) →
+  // OpenAI model name (what the group sends upstream). Unmapped names pass
+  // through unchanged.
+  modelMapping?: Record<string, string>;
 }
 
 export interface AppConfig {
@@ -159,6 +172,19 @@ function parseConfig(text: string): AppConfig {
     model: typeof g.model === 'string' && g.model ? g.model : undefined,
     rateLimitCooldownHours: typeof g.rateLimitCooldownHours === 'number' ? g.rateLimitCooldownHours : undefined,
     disabled: g.disabled === true ? true : undefined,
+    protocol: g.protocol === 'openai' ? 'openai' : undefined,
+    chatCompletionsPath:
+      typeof g.chatCompletionsPath === 'string' && g.chatCompletionsPath
+        ? g.chatCompletionsPath
+        : undefined,
+    modelMapping:
+      g.modelMapping && typeof g.modelMapping === 'object' && !Array.isArray(g.modelMapping)
+        ? Object.fromEntries(
+            Object.entries(g.modelMapping as Record<string, unknown>)
+              .filter(([, v]) => typeof v === 'string')
+              .map(([k, v]) => [String(k), String(v)]),
+          )
+        : undefined,
     keys: (g.keys || []).map((k: any) => ({
       id: String(k.id),
       email: String(k.email ?? ''),

@@ -240,6 +240,90 @@ export function findUnknownBlockTypes(body: AnthropicRequestBody): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// Non-streaming translation (OpenAI chat.completion JSON → Anthropic message)
+// ---------------------------------------------------------------------------
+
+interface OpenAiCompletion {
+  id?: string;
+  model?: string;
+  choices?: Array<{
+    message?: {
+      role?: string;
+      content?: string | null;
+      tool_calls?: Array<{
+        id?: string;
+        type?: string;
+        function?: { name?: string; arguments?: string };
+      }>;
+    };
+    finish_reason?: string | null;
+  }>;
+  usage?: { prompt_tokens?: number; completion_tokens?: number } | null;
+}
+
+// Translate a non-streaming OpenAI chat.completion into an Anthropic message
+// body. Returns null when the payload is not a recognizable completion.
+export function translateOpenAiCompletion(payload: unknown): AnthropicMessageResponse | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const completion = payload as OpenAiCompletion;
+  if (!Array.isArray(completion.choices) || completion.choices.length === 0) return null;
+  const choice = completion.choices[0];
+  const message = choice?.message;
+  if (!message || typeof message !== 'object') return null;
+
+  const content: Array<AnthropicTextBlock | AnthropicToolUseBlock> = [];
+  if (typeof message.content === 'string' && message.content !== '') {
+    content.push({ type: 'text', text: message.content });
+  }
+  for (const tc of message.tool_calls ?? []) {
+    let input: Record<string, unknown> = {};
+    if (typeof tc.function?.arguments === 'string' && tc.function.arguments !== '') {
+      try {
+        const parsed = JSON.parse(tc.function.arguments);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) input = parsed as Record<string, unknown>;
+      } catch {
+        // Unparseable arguments (aggregator oddity) — send an empty object
+        // rather than failing the whole translation.
+      }
+    }
+    content.push({
+      type: 'tool_use',
+      id: tc.id ?? '',
+      name: tc.function?.name ?? '',
+      input,
+    });
+  }
+
+  const finish = choice?.finish_reason;
+  const stopReason = finish === 'length' ? 'max_tokens' : finish === 'tool_calls' || finish === 'function_call' ? 'tool_use' : 'end_turn';
+
+  return {
+    id: 'msg_' + (completion.id ?? globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)),
+    type: 'message',
+    role: 'assistant',
+    model: completion.model ?? 'unknown',
+    content,
+    stop_reason: stopReason,
+    stop_sequence: null,
+    usage: {
+      input_tokens: typeof completion.usage?.prompt_tokens === 'number' ? completion.usage.prompt_tokens : 0,
+      output_tokens: typeof completion.usage?.completion_tokens === 'number' ? completion.usage.completion_tokens : 0,
+    },
+  };
+}
+
+export interface AnthropicMessageResponse {
+  id: string;
+  type: 'message';
+  role: 'assistant';
+  model: string;
+  content: Array<AnthropicTextBlock | AnthropicToolUseBlock>;
+  stop_reason: 'end_turn' | 'max_tokens' | 'tool_use';
+  stop_sequence: null;
+  usage: { input_tokens: number; output_tokens: number };
+}
+
+// ---------------------------------------------------------------------------
 // Stream translation (OpenAI SSE → Anthropic SSE)
 // ---------------------------------------------------------------------------
 
@@ -292,9 +376,6 @@ export function translateStream(
   options: TranslateStreamOptions = {},
 ): ReadableStream<Uint8Array> {
   const reader = upstream.getReader();
-  const decoder = new TextDecoder();
-  // SSE lines can split across chunks — keep the trailing partial line only.
-  let lineTail = '';
 
   let started = false;
   let finished = false;
@@ -399,9 +480,9 @@ export function translateStream(
       options.onAborted?.(err instanceof Error ? err.message : String(err));
       if (!stopReason) stopReason = 'end_turn';
     }
-    finishController && finish(finishController);
+    if (finishController) finish(finishController);
     try {
-      reader.cancel().catch(() => {});
+      void reader.cancel().catch(() => {});
     } catch {
       /* reader may already be released */
     }

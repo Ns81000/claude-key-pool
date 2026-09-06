@@ -280,7 +280,7 @@ export function getNextCandidate(config: AppConfig, selectedModel?: string | nul
 // The pool serves local tools of any kind (browsers, curl, SDKs), so every
 // upstream request goes out masked as a Claude CLI client — the same trick
 // proxy_ai (port 8318) plays with codex_cli_rs for Kilo Code.
-const MASK_USER_AGENT = 'claude-cli/2.0.0 (external, cli)';
+export const MASK_USER_AGENT = 'claude-cli/2.0.0 (external, cli)';
 
 // After an IP-level 429, pause ALL upstream traffic for this long. Every key
 // in the pool leaves from the same machine IP, so rotating on an IP-level
