@@ -124,6 +124,36 @@ connect прописывает в настройках Claude Code переме�
 пороги между ключами не отслеживаются — пул вместо этого консервативен на
 ошибках.
 
+## OpenAI-протокольный мост (группы `protocol: "openai"`)
+
+Группа с `protocol: "openai"` подключает OpenAI-совместимый агрегатор
+(OpenRouter и любой другой `/v1/chat/completions`): клиент по-прежнему
+говорит с пулом по Anthropic Messages API, пул транслирует запрос вверх и
+OpenAI-SSE-ответ обратно в Anthropic-SSE — claude.exe подмены не замечает.
+Ротация, cooldown, stall-защита, `/api/models` работают без изменений;
+тела ошибок OpenAI-формата покрываются расширенными списками классификатора.
+
+```json
+{
+  "id": "group_openrouter",
+  "targetUrl": "https://openrouter.ai/api",
+  "protocol": "openai",
+  "model": "claude-sonnet-4-5",
+  "modelMapping": { "claude-sonnet-4-5": "anthropic/claude-sonnet-4.5" },
+  "keys": [...]
+}
+```
+
+`protocol` опционален (дефолт `anthropic` — существующие конфиги не меняются);
+`chatCompletionsPath` (дефолт `/v1/chat/completions`) — для агрегаторов с
+другой базой; `modelMapping` — Anthropic-имя → OpenAI-имя, `[1m]`-суффикс
+срезается до маппинга. Ограничения v1 (thinking-блоки не транслируются,
+`/api/models` не ходит в `/v1/models` агрегатора) — в
+[docs/openai-protocol-bridge.md](docs/openai-protocol-bridge.md); там же
+маппинг событий и чеклист живого прогона.
+
+Тесты моста (40 шт., офлайн): `corepack pnpm exec vitest run`.
+
 ### Приоритет выбора ключа
 
 1. Свободный и не «медленный» (0 in-flight, без недавних таймаутов).
@@ -322,6 +352,7 @@ pnpm dev          # режим разработки (hot reload)
 - `src/app/api/config/route.ts` — панельные действия, `localGuard`
 - `src/app/api/shutdown/route.ts` — остановка сервера (с авто-disconnect)
 - `src/lib/proxy.ts` — выбор ключа (`getNextCandidate`, `buildFlatPool`), заголовки, классификация ответов, cooldown
+- `src/lib/translate.ts` — протокольный мост OpenAI⇄Anthropic (`translateRequest`, `translateStream`, `translateOpenAiCompletion`) для групп `protocol: "openai"`
 - `src/lib/config.ts` — `config.json` (mtime-кеш, hot reload), `connectToClaude`/`disconnectFromClaude`, `connectToKilo`/`disconnectFromKilo`, атомарная запись
 - `src/lib/kiloReload.ts` — обёртка авто-reload Kilo (spawn `scripts/kilo-reload.ps1`, таймаут, парсинг JSON-исхода)
 - `scripts/kilo-reload.ps1` — реплика кнопки «Перезагрузить» плагина Kilo: чтение одноразового пароля сервера из env его процесса (PEB, read-only) + `POST /instance/reload`
@@ -329,6 +360,7 @@ pnpm dev          # режим разработки (hot reload)
 - `src/lib/logger.ts` — цветные терминальные логи (метка ключа, ID запроса, причины ротации)
 - `src/lib/activity.ts` — лог запросов (кольцевой буфер на 500) и накопительная статистика по ключам (`stats.json`, debounce-персист); поле `client` (`claude`/`kilo`) разделяет профили в обоих слоях
 - `src/app/activity-panel.tsx` — панель «Key statistics» + «Recent requests» в дашборде
+- `tests/` — vitest: мост OpenAI⇄Anthropic (юнит + integration с node:http мок-агрегатором + регресс anthropic-конфига); `docs/openai-protocol-bridge.md` — спека моста
 - `config.json` — конфигурация с ключами (в `.gitignore`); `config.backup.json` — автоснимок пула перед перезаписью; `config.example.json` — шаблон; `stats.json` — накопительная статистика ключей (в `.gitignore`, рантайм-файл)
 - `install.ps1` / `update.ps1` — скрипты апстрима (к этой локальной копии не применяются)
 
